@@ -165,6 +165,15 @@ fun FolderScreen(channel: SyncChannel, folder: Folder, onBack: () -> Unit) {
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
             }
+            if (!channel.capabilities.canDeleteTargetFiles) {
+                Text(
+                    text = "当前是 REST 通道：Syncthing 官方 API 没有删除文件的接口，" +
+                        "所以取消勾选只会写入忽略规则，对方磁盘上已有的文件仍然保留。" +
+                        "要真正删除，需要配置 SMB/FTP 文件通道（开发中）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
 
             if (loading && rows.isEmpty()) {
                 Text("加载中…", modifier = Modifier.padding(16.dp))

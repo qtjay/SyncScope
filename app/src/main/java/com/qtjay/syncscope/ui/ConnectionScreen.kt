@@ -34,14 +34,17 @@ import androidx.compose.ui.unit.dp
 import com.qtjay.syncscope.channel.RestChannel
 import com.qtjay.syncscope.channel.ShareChannel
 import com.qtjay.syncscope.channel.SyncChannel
+import com.qtjay.syncscope.channel.TestResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
  * 首屏：选择连接方式。
- *   - REST API：功能完整，能看到远端未下载的文件，可主动触发重新扫描
- *   - 共享目录：SMB/FTP 由用户自行准备，只能看到本机已存在的文件
+ *   - REST API：功能完整，能看到远端未下载的文件，可主动触发重新扫描（但删不了文件）
+ *   - 本地共享目录：只能看到已存在的文件，却能真正写 .stignore 并删除文件
+ *
+ * 连接结果一定会显示出来：成功给出设备 ID / 目录名，失败给出可读原因。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -51,17 +54,20 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
     var address by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("8384") }
     var apiKey by remember { mutableStateOf("") }
+    var useHttps by remember { mutableStateOf(false) }
     var shareUri by remember { mutableStateOf<Uri?>(null) }
     var testing by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var status by remember { mutableStateOf<TestResult?>(null) }
     val scope = rememberCoroutineScope()
+
+    val ready = if (useShare) shareUri != null else address.isNotBlank()
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri != null) {
             shareUri = uri
-            error = null
+            status = null
         }
     }
 
@@ -77,56 +83,124 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (useShare) "共享目录 (SMB/FTP)" else "REST API")
+                Text(if (useShare) "本地共享目录" else "REST API")
                 Spacer(Modifier.weight(1f))
-                Switch(checked = useShare, onCheckedChange = { useShare = it })
+                Switch(checked = useShare, onCheckedChange = {
+                    useShare = it
+                    status = null
+                })
             }
 
             if (useShare) {
-                Text("由你在目标设备上开启 SMB/FTP 服务，再在此选择对应目录。")
+                Text(
+                    "选择目标文件夹在本机的挂载点（SMB / FTP 通道开发中，届时可直接填服务器地址）。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 Button(onClick = { launcher.launch(null) }) { Text("选择共享目录") }
-                Text(shareUri?.toString() ?: "尚未选择",
-                    style = MaterialTheme.typography.bodySmall)
+                Text(
+                    shareUri?.toString() ?: "尚未选择",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             } else {
-                OutlinedTextField(value = address, onValueChange = { address = it },
-                    label = { Text("地址") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = port, onValueChange = { port = it },
-                    label = { Text("端口") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = apiKey, onValueChange = { apiKey = it },
-                    label = { Text("API key") }, modifier = Modifier.fillMaxWidth())
-                Text("需在目标客户端开启 Web UI 远程访问，并填入 API key。",
-                    style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(
+                    value = address,
+                    onValueChange = { address = it },
+                    label = { Text("地址") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = port,
+                    onValueChange = { port = it },
+                    label = { Text("端口") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    label = { Text("API key") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("使用 HTTPS")
+                    Spacer(Modifier.weight(1f))
+                    Switch(checked = useHttps, onCheckedChange = { useHttps = it })
+                }
+                Text(
+                    "需在目标客户端开启 Web UI 远程访问，并填入 API key。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
 
             Button(
                 onClick = {
+                    status = null
                     testing = true
                     scope.launch {
-                        val created: SyncChannel? = if (useShare) {
+                        val target: SyncChannel? = if (useShare) {
                             shareUri?.let { ShareChannel(context.applicationContext, it) }
                         } else {
                             RestChannel(
-                                scheme = "http",
+                                scheme = if (useHttps) "https" else "http",
                                 host = address.trim(),
                                 port = port.trim().toIntOrNull() ?: 8384,
-                                apiKey = apiKey.trim()
+                                apiKey = apiKey.trim(),
                             )
                         }
-                        val ok = created != null && withContext(
-                            kotlinx.coroutines.Dispatchers.IO) {
-                            runCatching { created.test() != null }.getOrDefault(false)
+                        if (target == null) {
+                            status = TestResult.fail(
+                                if (useShare) "请先选择一个目录" else "请填写地址",
+                            )
+                            testing = false
+                            return@launch
+                        }
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching { target.test() }
+                                .getOrElse { e ->
+                                    TestResult.fail(
+                                        e.message ?: "连接失败：${e.javaClass.simpleName}",
+                                    )
+                                }
                         }
                         testing = false
-                        if (ok && created != null) {
-                            onConnected(created)
-                        } else {
-                            error = "连接失败，请检查地址与 API key"
+                        status = result
+                        if (result.ok) {
+                            onConnected(target)
+                        }
                     }
-                }
                 },
-                enabled = !testing && (if (useShare) shareUri != null else address.isNotBlank()),
+                enabled = !testing && ready,
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (testing) "测试中…" else "连接")
+            }
+
+            // 结果区：成功与失败都必须让用户看见
+            val shown = status
+            if (testing) {
+                Text(
+                    "正在连接…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else if (shown != null) {
+                val okNow = shown.ok
+                Text(
+                    text = if (okNow) "✓ ${shown.summary}" else "✗ ${shown.error}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (okNow) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                )
+                if (!okNow) {
+                    Text(
+                        "提示：REST 模式下目标客户端必须开启「Web UI 远程访问」，" +
+                            "且手机与它处于同一网络。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }

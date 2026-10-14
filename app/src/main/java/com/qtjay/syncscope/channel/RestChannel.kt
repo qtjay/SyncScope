@@ -30,15 +30,50 @@ class RestChannel(
     override val capabilities = Capabilities(
         canSeeRemoteOnlyFiles = true,
         canTriggerRescan = true,
+        // 官方 REST API 没有删除文件的端点，删除必须交给 SMB/FTP/本地通道
+        canDeleteTargetFiles = false,
     )
 
-    override fun test(): String? {
+    override fun test(): TestResult {
         return try {
             val parsed = gson.fromJson(get("/rest/system/status"), Map::class.java)
-            parsed?.get("myID") as? String
+            val id = parsed?.get("myID") as? String
+            if (id.isNullOrBlank()) {
+                TestResult.fail("连上了，但响应里没有 myID，可能不是 Syncthing 的 GUI 端口")
+            } else {
+                TestResult.ok("设备已连接，ID ${id.take(7)}…")
+            }
         } catch (e: Exception) {
             Log.w(TAG, "连接测试失败", e)
-            null
+            TestResult.fail(describe(e))
+        }
+    }
+
+    /** 把异常翻成人能看懂的中文，而不是一律"连接失败"。 */
+    private fun describe(e: Exception): String {
+        val raw = e.message.orEmpty()
+        return when {
+            e is java.net.UnknownHostException ->
+                "找不到主机 $host，请检查地址是否写错或设备是否离线"
+            e is java.net.ConnectException ->
+                "连接被拒绝：请确认端口 $port 正确，且目标客户端已开启 Web UI 远程访问"
+            e is java.net.SocketTimeoutException ->
+                "连接超时：地址不可达，或被防火墙/运营商拦住了"
+            e is javax.net.ssl.SSLHandshakeException ||
+                raw.contains("Trust anchor") ||
+                raw.contains("certificate") ->
+                "HTTPS 证书不受信任（Syncthing 默认用自签名证书）：改用 http，" +
+                    "或先在系统里信任该证书"
+            raw.contains("HTTP 401") ->
+                "API key 不正确（HTTP 401）"
+            raw.contains("HTTP 403") ->
+                "拒绝访问（HTTP 403），请检查 API key 权限"
+            raw.contains("HTTP 404") ->
+                "接口不存在（HTTP 404），可能端口指向的不是 Syncthing"
+            raw.startsWith("HTTP ") ->
+                "目标返回异常：$raw"
+            else ->
+                raw.ifBlank { e.toString() }
         }
     }
 
@@ -77,7 +112,17 @@ class RestChannel(
         }
     }
 
+    /**
+     * 只能用 java.io.File 删除**手机本机**上的文件。
+     *
+     * 若目标 Syncthing 跑在另一台设备，folder.path 在本机并不存在，
+     * 这里会原样返回全部 failed，真正的远程删除由 SMB/FTP 通道负责。
+     */
     override fun delete(folder: Folder, paths: List<String>): DeleteResult {
+        if (folder.path.isBlank() || !File(folder.path).exists()) {
+            Log.w(TAG, "目标路径不在本机，REST 通道无法删除：${folder.path}")
+            return DeleteResult(emptyList(), paths)
+        }
         // 父路径优先：先删目录，子项随之消失，
         // 避免把"已被父目录带走"误报成失败。
         val sorted = paths.sortedBy { it.length }

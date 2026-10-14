@@ -22,12 +22,18 @@ class ShareChannel(
     override val capabilities = Capabilities(
         canSeeRemoteOnlyFiles = false,
         canTriggerRescan = false,
+        canDeleteTargetFiles = true,
     )
 
     private fun root(): DocumentFile? = DocumentFile.fromTreeUri(context, treeUri)
 
-    override fun test(): String? {
-        return if (root()?.exists() == true) "" else null
+    override fun test(): TestResult {
+        val dir = root()
+        return when {
+            dir == null -> TestResult.fail("无法打开所选目录，授权可能已被撤销")
+            !dir.exists() -> TestResult.fail("目录不存在：${dir.name ?: treeUri}")
+            else -> TestResult.ok("目录可访问：${dir.name ?: "共享目录"}")
+        }
     }
 
     override fun folders(): List<Folder> {
