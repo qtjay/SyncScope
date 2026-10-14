@@ -34,7 +34,9 @@ import androidx.compose.ui.unit.dp
 import com.qtjay.syncscope.channel.RestChannel
 import com.qtjay.syncscope.channel.ShareChannel
 import com.qtjay.syncscope.channel.SyncChannel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 首屏：选择连接方式。

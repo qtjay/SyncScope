@@ -1,12 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="AppTheme" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="colorPrimary">@color/color_primary</item>
-        <item name="colorPrimaryDark">@color/color_primary_dark</item>
-        <item name="colorAccent">@color/color_accent</item>
+    <!--
+        SyncScope 是纯 Compose 应用，界面主题由 MaterialTheme 组合项决定。
+        这里的 XML 主题只负责窗口外观（状态栏、背景），
+        因此直接继承平台主题，不引用任何 AppCompat / Material Components 属性
+        （那些库不在依赖中，引用会导致资源链接失败）。
+    -->
+    <style name="AppTheme" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:statusBarColor">@color/color_primary_dark</item>
         <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">@android:color/white</item>
     </style>
 
 </resources>
