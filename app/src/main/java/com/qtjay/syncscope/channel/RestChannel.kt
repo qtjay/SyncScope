@@ -18,10 +18,14 @@ import java.net.URLEncoder
  * 这是功能最完整的通道 —— 既能看到远端未下载的文件，也能主动触发重新扫描。
  */
 class RestChannel(
-    private val baseUrl: String,
+    private val host: String,
+    private val port: Int,
     private val apiKey: String,
+    private val scheme: String = "http",
     private val gson: Gson = Gson(),
 ) : SyncChannel {
+
+    private val baseUrl = scheme + "://" + host + ":" + port
 
     override val capabilities = Capabilities(
         canSeeRemoteOnlyFiles = true,
@@ -30,8 +34,7 @@ class RestChannel(
 
     override fun test(): String? {
         return try {
-            val raw = get("/rest/system/status")
-            val parsed = gson.fromJson(raw, Map::class.java)
+            val parsed = gson.fromJson(get("/rest/system/status"), Map::class.java)
             parsed?.get("myID") as? String
         } catch (e: Exception) {
             Log.w(TAG, "连接测试失败", e)
@@ -61,9 +64,10 @@ class RestChannel(
     }
 
     override fun writeIgnores(folderId: String, lines: List<String>): Boolean {
-        val body = gson.toJson(mapOf("ignore" to lines))
         return try {
-            request("POST", "/rest/db/ignores?folder=" + enc(folderId), body = body)
+            // 实测：body 必须是 {"ignore": [...]}，纯字符串数组会被直接忽略
+            val body = gson.toJson(mapOf("ignore" to lines))
+            request("POST", "/rest/db/ignores?folder=" + enc(folderId), body)
             // 回读校验：确认规则确实写进去了，避免"看起来成功、实际没生效"
             val written = ignores(folderId)
             written.any { it.isNotBlank() } || lines.none { it.isNotBlank() }
@@ -86,7 +90,7 @@ class RestChannel(
             }
             var ok = deleteRecursively(file)
             if (!ok && file.exists()) {
-                // 可能正被 Syncthing 占用，稍等后重试一次
+                // 文件可能正被 Syncthing 占用，稍等后重试一次
                 try {
                     Thread.sleep(300L)
                 } catch (e: InterruptedException) {
@@ -94,10 +98,10 @@ class RestChannel(
                 }
                 ok = deleteRecursively(file)
             }
-            if (!ok && file.exists()) {
-                failed.add(path)
-            } else {
+            if (ok && !file.exists()) {
                 deleted.add(path)
+            } else {
+                failed.add(path)
             }
         }
         return DeleteResult(deleted, failed)
@@ -111,6 +115,20 @@ class RestChannel(
         }
     }
 
+    private fun deleteRecursively(file: File): Boolean {
+        if (file.isDirectory) {
+            val kids = file.listFiles()
+            if (kids != null) {
+                for (kid in kids) {
+                    if (!deleteRecursively(kid)) {
+                        return false
+                    }
+                }
+            }
+        }
+        return file.delete()
+    }
+
     private fun enc(value: String): String {
         return URLEncoder.encode(value, "UTF-8")
     }
@@ -120,9 +138,8 @@ class RestChannel(
     }
 
     private fun request(method: String, path: String, body: String? = null): String {
-        val url = URL(baseUrl.trimEnd('/') + path)
-        val conn = (url.openConnection() as? HttpURLConnection)
-            ?: throw IllegalStateException("无法建立连接: $url")
+        val url = URL(baseUrl + path)
+        val conn = url.openConnection() as HttpURLConnection
         return try {
             conn.requestMethod = method
             conn.setRequestProperty("X-API-Key", apiKey)
@@ -139,7 +156,7 @@ class RestChannel(
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
             if (code !in 200..299) {
-                throw IllegalStateException("HTTP $code: ${text.take(200)}")
+                throw IllegalStateException("HTTP " + code + ": " + text.take(200))
             }
             text
         } finally {

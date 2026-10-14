@@ -79,7 +79,19 @@ class ShareChannel(
             true
         } catch (e: Exception) {
             Log.w(TAG, "写入 .stignore 失败", e)
-        false
+            false
+        }
+    }
+
+    private fun readText(file: DocumentFile): String {
+        return try {
+            context.contentResolver.openInputStream(file.uri)?.use { input ->
+                input.bufferedReader(Charsets.UTF_8).readText()
+            } ?: ""
+        } catch (e: Exception) {
+            Log.w(TAG, "读取 .stignore 失败", e)
+            ""
+        }
     }
 
     override fun delete(folder: Folder, paths: List<String>): DeleteResult {
