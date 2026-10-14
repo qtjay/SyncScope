@@ -36,19 +36,22 @@ import androidx.compose.ui.unit.dp
 import com.qtjay.syncscope.channel.FtpChannel
 import com.qtjay.syncscope.channel.RestChannel
 import com.qtjay.syncscope.channel.ShareChannel
+import com.qtjay.syncscope.channel.SmbChannel
 import com.qtjay.syncscope.channel.SyncChannel
 import com.qtjay.syncscope.channel.TestResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private enum class Mode { REST, FTP, LOCAL }
+private enum class Mode { REST, FTP, SMB, LOCAL }
 
 /**
- * 首屏：选择连接方式。三类通道各有长短，后续会支持同时连接、互补短板。
- *   - REST：能看到远端未下载的文件、可触发重扫，但删不了文件
- *   - FTP：能写 .stignore 并删除文件，但看不到未下载的内容、不能触发重扫
- *   - 本地目录：通过系统文件选择器访问已挂载的目录，能力同 FTP
+ * 首屏：选择连接方式。
+ *
+ * 两类通道各有长短：
+ *   - 信息面（REST）：能看到远端未下载的文件、可触发重扫，但 API 没有删除接口
+ *   - 动作面（FTP / SMB / 本地目录）：能写 .stignore 并真正删除文件，
+ *     但看不到未下载的内容、也不能触发重扫
  *
  * 连接结果一定会显示：成功给出摘要，失败给出可读原因。
  */
@@ -63,6 +66,8 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
     var useHttps by remember { mutableStateOf(false) }
     var user by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var shareName by remember { mutableStateOf("") }
+    var domain by remember { mutableStateOf("") }
     var remotePath by remember { mutableStateOf("") }
     var shareUri by remember { mutableStateOf<Uri?>(null) }
     var testing by remember { mutableStateOf(false) }
@@ -72,6 +77,7 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
     val ready = when (mode) {
         Mode.REST -> address.isNotBlank()
         Mode.FTP -> address.isNotBlank()
+        Mode.SMB -> address.isNotBlank() && shareName.isNotBlank()
         Mode.LOCAL -> shareUri != null
     }
 
@@ -84,7 +90,9 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
         }
     }
 
-    fun reset() {
+    fun switchTo(next: Mode, defaultPort: String) {
+        mode = next
+        port = defaultPort
         status = null
     }
 
@@ -99,20 +107,18 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 ModeButton("REST", mode == Mode.REST, Modifier.weight(1f)) {
-                    mode = Mode.REST
-                    port = "8384"
-                    reset()
+                    switchTo(Mode.REST, "8384")
                 }
                 ModeButton("FTP", mode == Mode.FTP, Modifier.weight(1f)) {
-                    mode = Mode.FTP
-                    port = "21"
-                    reset()
+                    switchTo(Mode.FTP, "21")
                 }
-                ModeButton("本地目录", mode == Mode.LOCAL, Modifier.weight(1f)) {
-                    mode = Mode.LOCAL
-                    reset()
+                ModeButton("SMB", mode == Mode.SMB, Modifier.weight(1f)) {
+                    switchTo(Mode.SMB, "445")
+                }
+                ModeButton("本地", mode == Mode.LOCAL, Modifier.weight(1f)) {
+                    switchTo(Mode.LOCAL, port)
                 }
             }
 
@@ -181,14 +187,64 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text(
-                        "填目标共享文件夹所在的绝对路径。匿名登录请把用户名填 anonymous。",
+                        "填目标共享文件夹的绝对路径。匿名登录请把用户名填 anonymous。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+
+                Mode.SMB -> {
+                    OutlinedTextField(
+                        value = address,
+                        onValueChange = { address = it },
+                        label = { Text("SMB 地址") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = port,
+                        onValueChange = { port = it },
+                        label = { Text("端口") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = shareName,
+                        onValueChange = { shareName = it },
+                        label = { Text("共享名") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = user,
+                        onValueChange = { user = it },
+                        label = { Text("用户名") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = { Text("密码") },
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
+                    OutlinedTextField(
+                        value = domain,
+                        onValueChange = { domain = it },
+                        label = { Text("域（可留空）") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = remotePath,
+                        onValueChange = { remotePath = it },
+                        label = { Text("子路径（可留空）") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "仅支持 SMB2/SMB3。老设备只开 SMB1 的话连不上，请改用 FTP 或在服务端开启 SMB2。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
 
                 Mode.LOCAL -> {
                     Text(
-                        "选择目标文件夹在本机的挂载点（由你自行挂载 SMB/FTP 后在此选取）。",
+                        "选择目标文件夹在本机的挂载点（由你自行挂载后在此选取）。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Button(onClick = { launcher.launch(null) }) { Text("选择共享目录") }
@@ -201,7 +257,7 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
 
             Button(
                 onClick = {
-                    reset()
+                    status = null
                     testing = true
                     scope.launch {
                         val target: SyncChannel? = when (mode) {
@@ -218,6 +274,16 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
                                 user = user.trim(),
                                 password = password,
                                 remotePath = remotePath.trim(),
+                            )
+
+                            Mode.SMB -> SmbChannel(
+                                host = address.trim(),
+                                shareName = shareName.trim(),
+                                user = user.trim(),
+                                password = password,
+                                domain = domain.trim(),
+                                path = remotePath.trim(),
+                                port = port.trim().toIntOrNull() ?: 445,
                             )
 
                             Mode.LOCAL -> shareUri?.let {
@@ -269,17 +335,21 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
                         MaterialTheme.colorScheme.error
                     },
                 )
-                if (!okNow && mode == Mode.REST) {
+                if (!okNow) {
+                    val hint = when (mode) {
+                        Mode.REST ->
+                            "提示：REST 模式下目标客户端必须开启「Web UI 远程访问」，" +
+                                "且手机与它处于同一网络。"
+                        Mode.FTP ->
+                            "提示：请确认 FTP 服务已开启、端口正确，路径用绝对路径。"
+                        Mode.SMB ->
+                            "提示：请确认共享名正确、账号有权限，" +
+                                "且服务端支持 SMB2 以上。"
+                        Mode.LOCAL ->
+                            "提示：请重新选择目录，系统可能已收回授权。"
+                    }
                     Text(
-                        "提示：REST 模式下目标客户端必须开启「Web UI 远程访问」，" +
-                            "且手机与它处于同一网络。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                if (!okNow && mode == Mode.FTP) {
-                    Text(
-                        "提示：请确认 FTP 服务已开启、端口正确，且路径用的是绝对路径。",
+                        hint,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

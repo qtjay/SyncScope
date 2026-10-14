@@ -29,6 +29,10 @@ documentfile = "1.1.0"
 fragment-ktx = "1.9.1"
 # FTP 客户端：compile 依赖只有 commons-io，Java 8 编译，Android 上风险低
 commons-net = "3.13.0"
+# SMB2/SMB3 客户端（不支持已淘汰的 SMB1）。
+# runtime 依赖：slf4j-api / bcprov-jdk18on / mbassador / asn-one；
+# mssmb2 与 msdtyp 的类直接打包在 smbj 的 jar 里，无需额外引入。
+smbj = "0.14.0"
 gson = "2.14.0"
 guava = "33.7.1-android"
 jbcrypt = "0.4"
@@ -66,6 +70,7 @@ dagger = { module = "com.google.dagger:dagger", version.ref = "dagger" }
 dagger-compiler = { module = "com.google.dagger:dagger-compiler", version.ref = "dagger" }
 documentfile = { module = "androidx.documentfile:documentfile", version.ref = "documentfile" }
 commons-net = { module = "commons-net:commons-net", version.ref = "commons-net" }
+smbj = { module = "com.hierynomus:smbj", version.ref = "smbj" }
 fragment-ktx = { module = "androidx.fragment:fragment-ktx", version.ref = "fragment-ktx" }
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
 guava = { module = "com.google.guava:guava", version.ref = "guava" }
