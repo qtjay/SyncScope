@@ -63,22 +63,49 @@ private enum class Mode { REST, FTP, SMB, LOCAL }
 @Composable
 fun ConnectionScreen(
     title: String = "SyncScope",
+    /** 传入已有配置即进入编辑模式：字段预填，保存时沿用原 id。 */
+    initial: ClientProfile? = null,
     onCancel: (() -> Unit)? = null,
     onConnected: (SyncChannel, ClientProfile) -> Unit,
 ) {
     val context = LocalContext.current
-    var mode by remember { mutableStateOf(Mode.REST) }
-    var name by remember { mutableStateOf("") }
-    var address by remember { mutableStateOf("") }
-    var port by remember { mutableStateOf("8384") }
-    var apiKey by remember { mutableStateOf("") }
-    var useHttps by remember { mutableStateOf(false) }
-    var user by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var shareName by remember { mutableStateOf("") }
-    var domain by remember { mutableStateOf("") }
-    var remotePath by remember { mutableStateOf("") }
-    var shareUri by remember { mutableStateOf<Uri?>(null) }
+    val startMode = when (initial?.kind) {
+        ProfileKind.REST -> Mode.REST
+        ProfileKind.FTP -> Mode.FTP
+        ProfileKind.SMB -> Mode.SMB
+        ProfileKind.LOCAL -> Mode.LOCAL
+        null -> Mode.REST
+    }
+    val key = initial?.id
+    // key 变化（换了一个配置来编辑）时重新预填，而不是沿用上一次的输入
+    var mode by remember(key) { mutableStateOf(startMode) }
+    var name by remember(key) { mutableStateOf(initial?.name.orEmpty()) }
+    var address by remember(key) { mutableStateOf(initial?.host.orEmpty()) }
+    var port by remember(key) {
+        mutableStateOf(
+            initial?.port.orEmpty().ifBlank {
+                when (startMode) {
+                    Mode.REST -> "8384"
+                    Mode.FTP -> "21"
+                    Mode.SMB -> "445"
+                    Mode.LOCAL -> "8384"
+                }
+            },
+        )
+    }
+    val startSecret = initial?.secret.orEmpty()
+    var apiKey by remember(key) { mutableStateOf(startSecret) }
+    var password by remember(key) { mutableStateOf(startSecret) }
+    var useHttps by remember(key) { mutableStateOf(initial?.useHttps ?: false) }
+    var user by remember(key) { mutableStateOf(initial?.user.orEmpty()) }
+    var shareName by remember(key) { mutableStateOf(initial?.shareName.orEmpty()) }
+    var domain by remember(key) { mutableStateOf(initial?.domain.orEmpty()) }
+    var remotePath by remember(key) { mutableStateOf(initial?.path.orEmpty()) }
+    var shareUri by remember(key) {
+        mutableStateOf<Uri?>(
+            initial?.treeUri?.takeIf { it.isNotBlank() }?.let { Uri.parse(it) },
+        )
+    }
     var testing by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<TestResult?>(null) }
     val scope = rememberCoroutineScope()
@@ -372,7 +399,13 @@ fun ConnectionScreen(
                 enabled = !testing && ready,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (testing) "测试中…" else "连接")
+                Text(
+                    when {
+                        testing -> "测试中…"
+                        initial != null -> "测试并保存"
+                        else -> "连接"
+                    },
+                )
             }
 
             // 结果区：成功与失败都必须让用户看见
