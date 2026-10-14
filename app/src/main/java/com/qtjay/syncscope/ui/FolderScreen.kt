@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -53,7 +54,12 @@ private class TreeRow(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FolderScreen(channel: SyncChannel, folder: Folder, onBack: () -> Unit) {
+fun FolderScreen(
+    channel: SyncChannel,
+    folder: Folder,
+    onBack: () -> Unit,
+    onAttachFileChannel: () -> Unit = {},
+) {
     val scope = rememberCoroutineScope()
     val rows = remember { mutableStateListOf<TreeRow>() }
     val selectedDirs = remember { mutableStateMapOf<String, Boolean>() }
@@ -167,11 +173,29 @@ fun FolderScreen(channel: SyncChannel, folder: Folder, onBack: () -> Unit) {
             }
             if (!channel.capabilities.canDeleteTargetFiles) {
                 Text(
-                    text = "当前是 REST 通道：Syncthing 官方 API 没有删除文件的接口，" +
-                        "所以取消勾选只会写入忽略规则，对方磁盘上已有的文件仍然保留。" +
-                        "要真正删除，需要配置 SMB/FTP 文件通道（开发中）。",
+                    text = "当前只有 REST 通道：Syncthing 官方 API 没有删除文件的接口，" +
+                        "所以取消勾选只会写入忽略规则，对方磁盘上已有的文件仍然保留。",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                OutlinedButton(
+                    onClick = onAttachFileChannel,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                ) {
+                    Text("添加文件通道（FTP / SMB / 本地）")
+                }
+            }
+
+            if (channel.capabilities.canDeleteTargetFiles &&
+                channel.capabilities.canSeeRemoteOnlyFiles
+            ) {
+                Text(
+                    text = "混合模式已启用：目录与规则走 REST，删除走文件通道。",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.primary,
                 )
             }
 

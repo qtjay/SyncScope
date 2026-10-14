@@ -20,6 +20,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -46,6 +47,13 @@ import kotlinx.coroutines.withContext
 private enum class Mode { REST, FTP, SMB, LOCAL }
 
 /**
+ * 通道角色。
+ *  - INFO：信息面（REST），负责"看"和"触发扫描"
+ *  - ACTION：动作面（FTP/SMB/本地目录），负责"真正删文件"
+ */
+enum class ChannelRole { INFO, ACTION }
+
+/**
  * 首屏：选择连接方式。
  *
  * 两类通道各有长短：
@@ -57,7 +65,11 @@ private enum class Mode { REST, FTP, SMB, LOCAL }
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
+fun ConnectionScreen(
+    title: String = "SyncScope",
+    onCancel: (() -> Unit)? = null,
+    onConnected: (SyncChannel, ChannelRole) -> Unit,
+) {
     val context = LocalContext.current
     var mode by remember { mutableStateOf(Mode.REST) }
     var address by remember { mutableStateOf("") }
@@ -97,7 +109,18 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("SyncScope") }) },
+        topBar = {
+            if (onCancel != null) {
+                TopAppBar(
+                    title = { Text(title) },
+                    navigationIcon = {
+                        TextButton(onClick = onCancel) { Text("返回") }
+                    },
+                )
+            } else {
+                TopAppBar(title = { Text(title) })
+            }
+        },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -306,7 +329,12 @@ fun ConnectionScreen(onConnected: (SyncChannel) -> Unit) {
                         testing = false
                         status = result
                         if (result.ok) {
-                            onConnected(target)
+                            val role = if (mode == Mode.REST) {
+                                ChannelRole.INFO
+                            } else {
+                                ChannelRole.ACTION
+                            }
+                            onConnected(target, role)
                         }
                     }
                 },
