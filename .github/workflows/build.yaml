@@ -11,18 +11,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Set up Java
-        uses: actions/setup-java@v6.0.1
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # android-actions/setup-android 已无法解析，改用写入 SDK 许可的方式，
+      # 让 gradle 按需自行下载 platform / build-tools 组件。
+      - name: Accept Android SDK licenses
+        run: |
+          set -eu
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          mkdir -p "$SDK/licenses"
+          echo "8933bad161af4178b1185d1a37fbf41ea5269c55" > "$SDK/licenses/android-sdk-license"
+          echo "d56f5187479451eabf01fb78af6dfcb131a6481e" >> "$SDK/licenses/android-sdk-license"
+          echo "24333f8a63b7025aa0b0f6a5c1d5c1da" > "$SDK/licenses/android-sdk-preview-license"
+          echo "已写入 SDK 许可"
 
       - name: Build Debug
         run: |
@@ -32,7 +41,7 @@ jobs:
           ./gradlew --no-daemon assembleDebug -PbranchBuild="${BRANCH_BUILD}"
 
       - name: Upload APK
-        uses: actions/upload-artifact@v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: syncscope-debug
           path: app/build/outputs/apk/debug/*.apk
