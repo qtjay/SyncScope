@@ -23,3 +23,6 @@ Thumbs.db
 *.keystore
 *.b64
 .gh_token
+
+# 本地下载的构建产物
+dist/
