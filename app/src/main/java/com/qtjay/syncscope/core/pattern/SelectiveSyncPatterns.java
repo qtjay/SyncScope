@@ -199,6 +199,124 @@ public final class SelectiveSyncPatterns {
         return stignoreText != null && stignoreText.contains(BLOCK_BEGIN);
     }
 
+    /** 反解托管块得到的勾选集合。 */
+    public static final class Selection {
+        /** 是否存在托管块；不存在意味着"选择性同步没开，全部同步"。 */
+        public final boolean hasBlock;
+        /** 所有被放行的路径（含只放行了部分子项的目录本身）。 */
+        public final List<String> selectedPaths;
+        /** 整棵子树都被选中的目录（规则里带 /** 的那些）。 */
+        public final Set<String> fullDirs;
+
+        private Selection(boolean hasBlock, List<String> selectedPaths, Set<String> fullDirs) {
+            this.hasBlock = hasBlock;
+            this.selectedPaths = selectedPaths;
+            this.fullDirs = fullDirs;
+        }
+    }
+
+    /**
+     * 把托管块反解成"哪些路径是勾上的"，用于在目录树上还原现有规则。
+     *
+     * <p>块内两类行有含义：{@code !/x/**} 表示整个目录被选中，
+     * {@code !/x} 表示该项被放行（若是目录则说明只放行了其中一部分子项）；
+     * 其余 {@code /x/**} 只是"忽略本层其余子项"的脚手架，不代表勾选。
+     */
+    public static Selection parseManagedBlock(String stignoreText) {
+        List<String> selected = new ArrayList<>();
+        Set<String> full = new LinkedHashSet<>();
+        boolean hasBlock = hasManagedBlock(stignoreText);
+        if (stignoreText == null) {
+            return new Selection(false, selected, full);
+        }
+        boolean inside = false;
+        for (String raw : stignoreText.split("\n", -1)) {
+            String line = raw.trim();
+            if (line.equals(BLOCK_BEGIN)) {
+                inside = true;
+                continue;
+            }
+            if (line.equals(BLOCK_END)) {
+                inside = false;
+                continue;
+            }
+            if (!inside || !line.startsWith("!")) {
+                continue;
+            }
+            boolean subtree = line.endsWith("/**");
+            String path = toPath(line.substring(1));
+            if (path.isEmpty()) {
+                continue;
+            }
+            if (subtree) {
+                full.add(path);
+            }
+            if (!selected.contains(path)) {
+                selected.add(path);
+            }
+        }
+        return new Selection(hasBlock, selected, full);
+    }
+
+    /** 去掉托管块，只保留用户自己的规则（关闭选择性同步时用）。 */
+    public static String stripManagedBlock(String stignoreText) {
+        if (stignoreText == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        boolean inside = false;
+        for (String raw : stignoreText.split("\n", -1)) {
+            String line = raw.trim();
+            if (line.equals(BLOCK_BEGIN)) {
+                inside = true;
+                continue;
+            }
+            if (line.equals(BLOCK_END)) {
+                inside = false;
+                continue;
+            }
+            if (inside) {
+                continue;
+            }
+            sb.append(raw).append('\n');
+        }
+        String result = sb.toString();
+        while (result.endsWith("\n\n")) {
+            result = result.substring(0, result.length() - 1);
+        }
+        return result;
+    }
+
+    /** 规则行 -> 相对路径：去掉前导 / 、尾部 /** 与转义符。 */
+    private static String toPath(String pattern) {
+        String p = pattern.trim();
+        if (p.startsWith("/")) {
+            p = p.substring(1);
+        }
+        if (p.endsWith("/**")) {
+            p = p.substring(0, p.length() - 3);
+        }
+        while (p.endsWith("/")) {
+            p = p.substring(0, p.length() - 1);
+        }
+        return unescape(p);
+    }
+
+    private static String unescape(String value) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == ESCAPE_CHAR && i + 1 < value.length()
+                    && SPECIAL_CHARS.indexOf(value.charAt(i + 1)) >= 0) {
+                sb.append(value.charAt(i + 1));
+                i++;
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
     /**
      * 逐层生成：先放行该层需要的子项（含其子树），再忽略该层其余子项。
      * 每层末尾那条"忽略其余子项"是关键 —— 只靠一条全局兜底拦不住深层路径。

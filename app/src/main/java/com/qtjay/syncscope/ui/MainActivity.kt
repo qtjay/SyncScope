@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import com.qtjay.syncscope.channel.CompositeChannel
 import com.qtjay.syncscope.channel.SyncChannel
 import com.qtjay.syncscope.core.model.Folder
+import com.qtjay.syncscope.core.model.FolderStatus
 import com.qtjay.syncscope.data.ClientProfile
 import com.qtjay.syncscope.data.ProfileRole
 import com.qtjay.syncscope.data.ProfileStore
@@ -74,6 +75,7 @@ fun SyncScopeApp() {
     var reloadKey by remember { mutableStateOf(0) }
     var channel by remember { mutableStateOf<SyncChannel?>(null) }
     var folders by remember { mutableStateOf<List<Folder>>(emptyList()) }
+    var statuses by remember { mutableStateOf<Map<String, FolderStatus>>(emptyMap()) }
     var folder by remember { mutableStateOf<Folder?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf(false) }
@@ -121,8 +123,18 @@ fun SyncScopeApp() {
         val list = combined?.let {
             withContext(Dispatchers.IO) { runCatching { it.folders() }.getOrDefault(emptyList()) }
         } ?: emptyList()
+        val statusMap = HashMap<String, FolderStatus>()
+        for (item in list) {
+            val st = withContext(Dispatchers.IO) {
+                runCatching { combined?.status(item.id) }.getOrNull()
+            }
+            if (st != null) {
+                statusMap[item.id] = st
+            }
+        }
         channel = combined
         folders = list
+        statuses = statusMap
         folder = null
         status = when {
             combined == null -> "配置无效，请重新添加"
@@ -279,6 +291,7 @@ fun SyncScopeApp() {
                         FolderScreen(
                             channel = active,
                             folder = current,
+                            folderStatus = statuses[current.id],
                             onBack = { folder = null },
                             onAttachFileChannel = {
                                 editingRole = ProfileRole.ACTION

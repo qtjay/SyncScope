@@ -3,6 +3,7 @@ package com.qtjay.syncscope.channel
 import android.util.Log
 import com.qtjay.syncscope.core.model.BrowseEntry
 import com.qtjay.syncscope.core.model.Folder
+import com.qtjay.syncscope.core.model.FolderStatus
 
 /**
  * 混合通道：把"信息面"与"动作面"两个通道合成一个，互补短板。
@@ -101,6 +102,11 @@ class CompositeChannel(
 
     override fun rescan(folderId: String) {
         infoChannel?.rescan(folderId) ?: actionChannel?.rescan(folderId)
+    }
+
+    /** 状态只有信息面（REST）拿得到。 */
+    override fun status(folderId: String): FolderStatus? {
+        return infoChannel?.status(folderId) ?: actionChannel?.status(folderId)
     }
 
     private fun <T> firstNotEmpty(vararg providers: () -> List<T>?): List<T> {

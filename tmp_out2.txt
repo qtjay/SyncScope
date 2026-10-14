@@ -1,0 +1,58 @@
+择集本身持久化在 {@link SelectiveSyncStore}。 */
+    public static boolean hasManagedBlock(String stignoreText) {
+        return stignoreText != null && stignoreText.contains(BLOCK_BEGIN);
+    }
+
+    /**
+     * 逐层生成：先放行该层需要的子项（含其子树），再忽略该层其余子项。
+     * 每层末尾那条"忽略其余子项"是关键 —— 只靠一条全局兜底拦不住深层路径。
+     */
+    private static void walk(String directory, Map<String, List<String>> children,
+                             Set<String> dirs, List<String> lines, Set<String> seen,
+                             List<String> warnings) {
+        List<String> kids = children.get(directory);
+        if (kids != null) {
+            for (String name : kids) {
+                String path = directory.isEmpty() ? name : directory + "/" + name;
+                if (dirs.contains(path)) {
+                    // 整个目录都被选中：先放行其整棵子树，再放行目录本身
+                    emit(lines, seen, "!/" + escaped(path, warnings) + "/**");
+                    emit(lines, seen, "!/" + escaped(path, warnings));
+                } else if (children.containsKey(path)) {
+                    // 只放行了其中一部分：先下钻（内部先放行所需子项，再忽略其余），
+                    // 最后才放行目录本身 —— 顺序颠倒会让"忽略其余"对子项失效。
+                    walk(path, children, dirs, lines, seen, warnings);
+                    emit(lines, seen, "!/" + escaped(path, warnings));
+                } else {
+                    emit(lines, seen, "!/" + escaped(path, warnings));
+                }
+            }
+        }
+        emit(lines, seen, directory.isEmpty() ? "/**" : "/" + escaped(directory, warnings) + "/**");
+    }
+
+    private static void emit(List<String> lines, Set<String> seen, String line) {
+        if (seen.add(line)) {
+            lines.add(line);
+        }
+    }
+
+    private static String join(String[] comps, int count) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            if (i > 0) {
+                sb.append('/');
+            }
+            sb.append(comps[i]);
+        }
+        return sb.toString();
+    }
+
+    private static String escaped(String path, List<String> warnings) {
+        StringBuilder sb = new StringBuilder();
+        String[] comps = path.split("/");
+        for (int i = 0; i < comps.length; i++) {
+            if (i > 0) {
+                sb.append('/');
+            }
+            sb.append(safeComponent(comps[i], pat

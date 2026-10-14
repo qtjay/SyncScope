@@ -5,6 +5,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.qtjay.syncscope.core.model.BrowseEntry
 import com.qtjay.syncscope.core.model.Folder
+import com.qtjay.syncscope.core.model.FolderStatus
 import java.io.File
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -157,6 +158,34 @@ class RestChannel(
             request("POST", "/rest/db/scan?folder=" + enc(folderId))
         } catch (e: Exception) {
             Log.w(TAG, "触发 rescan 失败", e)
+        }
+    }
+
+    /** GET /rest/db/status：文件数、字节数与同步进度。 */
+    override fun status(folderId: String): FolderStatus? {
+        return try {
+            val parsed = gson.fromJson(
+                get("/rest/db/status?folder=" + enc(folderId)),
+                Map::class.java,
+            ) ?: return null
+
+            fun number(key: String): Long {
+                return (parsed[key] as? Number)?.toLong() ?: 0L
+            }
+
+            FolderStatus(
+                state = parsed["state"] as? String ?: "",
+                localFiles = number("localFiles"),
+                globalFiles = number("globalFiles"),
+                needFiles = number("needFiles"),
+                localBytes = number("localBytes"),
+                globalBytes = number("globalBytes"),
+                needBytes = number("needBytes"),
+                inSyncFiles = number("inSyncFiles"),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "读取文件夹状态失败", e)
+            null
         }
     }
 

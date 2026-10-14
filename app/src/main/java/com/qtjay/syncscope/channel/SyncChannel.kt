@@ -2,6 +2,7 @@ package com.qtjay.syncscope.channel
 
 import com.qtjay.syncscope.core.model.BrowseEntry
 import com.qtjay.syncscope.core.model.Folder
+import com.qtjay.syncscope.core.model.FolderStatus
 
 /** 删除结果。 */
 data class DeleteResult(
@@ -90,4 +91,10 @@ interface SyncChannel {
 
     /** 请求重新扫描（REST 才有实际作用）。 */
     fun rescan(folderId: String)
+
+    /**
+     * 读取文件夹的同步状态（文件数、字节数、同步进度）。
+     * 只有 REST 通道能提供，其余通道返回 null。
+     */
+    fun status(folderId: String): FolderStatus? = null
 }
