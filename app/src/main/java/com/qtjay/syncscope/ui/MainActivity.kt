@@ -3,16 +3,45 @@ package com.qtjay.syncscope.ui
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 
 import com.qtjay.syncscope.channel.CompositeChannel
 import com.qtjay.syncscope.channel.SyncChannel
 import com.qtjay.syncscope.core.model.Folder
+import com.qtjay.syncscope.data.ClientProfile
+import com.qtjay.syncscope.data.ProfileRole
+import com.qtjay.syncscope.data.ProfileStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -25,72 +54,240 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { CONNECT, PICK, FOLDER }
-
 /**
- * 应用主流程。
+ * 应用外壳：左侧抽屉管理多个客户端配置，随时切换。
  *
- * 支持"混合模式"：信息面通道（REST）与动作面通道（FTP/SMB/本地目录）各连一个，
- * 两个都在时合成 CompositeChannel，看用 REST、删用文件通道。
+ * 每个配置可以是信息面（REST）或动作面（FTP/SMB/本地目录），
+ * 两者都在时合成 CompositeChannel —— 看走 REST，删走文件通道。
+ * 连接成功后会立刻把同步文件夹列表取回来，并提示补一个文件通道。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SyncScopeApp() {
-    var screen by remember { mutableStateOf(Screen.CONNECT) }
-    var infoChannel by remember { mutableStateOf<SyncChannel?>(null) }
-    var actionChannel by remember { mutableStateOf<SyncChannel?>(null) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+
+    var profiles by remember { mutableStateOf(ProfileStore.load(context.applicationContext)) }
+    var activeId by remember { mutableStateOf<String?>(null) }
+    var actionId by remember { mutableStateOf<String?>(null) }
+    var reloadKey by remember { mutableStateOf(0) }
+    var channel by remember { mutableStateOf<SyncChannel?>(null) }
+    var folders by remember { mutableStateOf<List<Folder>>(emptyList()) }
     var folder by remember { mutableStateOf<Folder?>(null) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var editing by remember { mutableStateOf(false) }
+    var editingRole by remember { mutableStateOf(ProfileRole.INFO) }
 
-    val channel: SyncChannel? = when {
-        infoChannel != null && actionChannel != null ->
-            CompositeChannel(infoChannel, actionChannel)
-
-        infoChannel != null -> infoChannel
-        actionChannel != null -> actionChannel
-        else -> null
+    fun persist(list: List<ClientProfile>) {
+        profiles = list
+        ProfileStore.save(context.applicationContext, list)
     }
 
-    val active = channel
-    val picked = folder
+    fun deleteProfile(id: String) {
+        persist(profiles.filterNot { it.id == id || it.linkedTo == id })
+        if (activeId == id) activeId = null
+        if (actionId == id) actionId = null
+        folder = null
+    }
 
-    if (active == null || screen == Screen.CONNECT) {
+    // 切换配置 / 点刷新：连上之后立刻取同步文件夹信息
+    LaunchedEffect(activeId, actionId, reloadKey) {
+        val infoProfile = profiles.firstOrNull { it.id == activeId }
+        val actionProfile = profiles.firstOrNull { it.id == actionId }
+        if (infoProfile == null && actionProfile == null) {
+            channel = null
+            folders = emptyList()
+            folder = null
+            status = null
+            return@LaunchedEffect
+        }
+        status = "正在连接…"
+        val infoCh = withContext(Dispatchers.IO) {
+            runCatching { infoProfile?.build(context.applicationContext) }.getOrNull()
+        }
+        val actCh = withContext(Dispatchers.IO) {
+            runCatching { actionProfile?.build(context.applicationContext) }.getOrNull()
+        }
+        val combined: SyncChannel? = when {
+            infoCh != null && actCh != null -> CompositeChannel(infoCh, actCh)
+            infoCh != null -> infoCh
+            actCh != null -> actCh
+            else -> null
+        }
+        val result = combined?.let {
+            withContext(Dispatchers.IO) { runCatching { it.test() }.getOrNull() }
+        }
+        val list = combined?.let {
+            withContext(Dispatchers.IO) { runCatching { it.folders() }.getOrDefault(emptyList()) }
+        } ?: emptyList()
+        channel = combined
+        folders = list
+        folder = null
+        status = when {
+            combined == null -> "配置无效，请重新添加"
+            result == null -> "连接失败"
+            result.ok -> result.summary
+            else -> result.error
+        }
+    }
+
+    if (editing) {
         ConnectionScreen(
-            title = if (active == null) "SyncScope" else "添加文件通道",
-            onCancel = if (active != null) {
-                { screen = if (picked != null) Screen.FOLDER else Screen.PICK }
-            } else {
-                null
-            },
-            onConnected = { connected, role ->
-                if (role == ChannelRole.INFO) {
-                    infoChannel = connected
+            title = if (editingRole == ProfileRole.ACTION) "添加文件通道" else "添加客户端配置",
+            onCancel = { editing = false },
+            onConnected = { _, profile ->
+                val saved = if (profile.role == ProfileRole.ACTION) {
+                    profile.copy(linkedTo = activeId.orEmpty())
                 } else {
-                    actionChannel = connected
+                    profile
                 }
-                screen = if (picked != null) Screen.FOLDER else Screen.PICK
-            },
-        )
-    } else if (picked == null) {
-        FolderPickScreen(
-            channel = active,
-            onPick = { selected ->
-                folder = selected
-                screen = Screen.FOLDER
-            },
-            onBack = {
-                infoChannel = null
-                actionChannel = null
-                screen = Screen.CONNECT
-            },
-        )
-    } else {
-        FolderScreen(
-            channel = active,
-            folder = picked,
-            onBack = {
+                persist(profiles + saved)
+                editing = false
                 folder = null
-                screen = Screen.PICK
+                if (saved.role == ProfileRole.INFO) {
+                    activeId = saved.id
+                    actionId = profiles.firstOrNull {
+                        it.role == ProfileRole.ACTION && it.linkedTo == saved.id
+                    }?.id
+                } else {
+                    actionId = saved.id
+                }
             },
-            onAttachFileChannel = { screen = Screen.CONNECT },
         )
+        return
+    }
+
+    val activeName = profiles.firstOrNull { it.id == activeId }?.name
+        ?: profiles.firstOrNull { it.id == actionId }?.name
+        ?: "SyncScope"
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet {
+                Column(modifier = Modifier.padding(vertical = 12.dp)) {
+                    Text(
+                        "客户端配置",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                    )
+                    profiles.forEach { profile ->
+                        NavigationDrawerItem(
+                            label = {
+                                Column {
+                                    Text(profile.name)
+                                    Text(
+                                        profile.subtitle(),
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            },
+                            selected = profile.id == activeId || profile.id == actionId,
+                            badge = {
+                                Text(
+                                    profile.roleLabel(),
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            },
+                            onClick = {
+                                if (profile.role == ProfileRole.INFO) {
+                                    activeId = profile.id
+                                    actionId = profiles.firstOrNull {
+                                        it.role == ProfileRole.ACTION && it.linkedTo == profile.id
+                                    }?.id
+                                } else {
+                                    actionId = profile.id
+                                    if (profile.linkedTo.isNotBlank()) {
+                                        activeId = profile.linkedTo
+                                    }
+                                }
+                                folder = null
+                                scope.launch { drawerState.close() }
+                            },
+                        )
+                    }
+                    NavigationDrawerItem(
+                        label = { Text("＋ 添加客户端配置") },
+                        selected = false,
+                        onClick = {
+                            editingRole = ProfileRole.INFO
+                            editing = true
+                            scope.launch { drawerState.close() }
+                        },
+                    )
+                }
+            }
+        },
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(activeName) },
+                    navigationIcon = {
+                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                            Icon(Icons.Default.Menu, contentDescription = "打开配置列表")
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = { reloadKey++ }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "重新连接并获取")
+                        }
+                        val removable = activeId ?: actionId
+                        if (removable != null) {
+                            IconButton(onClick = { deleteProfile(removable) }) {
+                                Icon(Icons.Default.Delete, contentDescription = "删除当前配置")
+                            }
+                        }
+                    },
+                )
+            },
+        ) { padding ->
+            Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+                val shown = status
+                if (shown != null) {
+                    Text(
+                        shown,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                }
+                val active = channel
+                val current = folder
+                when {
+                    active == null -> {
+                        Text(
+                            "还没有配置。点左上角菜单 →「＋ 添加客户端配置」。",
+                            modifier = Modifier.padding(16.dp),
+                        )
+                    }
+
+                    current == null -> {
+                        FolderPickScreen(
+                            channel = active,
+                            folders = folders,
+                            onPick = { folder = it },
+                            onAddFileChannel = {
+                                editingRole = ProfileRole.ACTION
+                                editing = true
+                            },
+                            onReload = { reloadKey++ },
+                        )
+                    }
+
+                    else -> {
+                        FolderScreen(
+                            channel = active,
+                            folder = current,
+                            onBack = { folder = null },
+                            onAttachFileChannel = {
+                                editingRole = ProfileRole.ACTION
+                                editing = true
+                            },
+                        )
+                    }
+                }
+            }
+        }
     }
 }

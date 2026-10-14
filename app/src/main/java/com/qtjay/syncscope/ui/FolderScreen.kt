@@ -12,9 +12,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -158,12 +157,17 @@ fun FolderScreen(
         return TriState.OFF
     }
 
-    Scaffold(
-        topBar = { TopAppBar(title = { Text(folder.displayName) }) },
-    ) { padding ->
-        Column(
-            modifier = Modifier.fillMaxSize().padding(padding),
+    // 顶栏由外壳（抽屉）提供，这里只放一个返回入口，避免两层标题栏
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 8.dp),
         ) {
+            TextButton(onClick = onBack) { Text("← 返回") }
+            Text(folder.displayName, style = MaterialTheme.typography.titleMedium)
+        }
+
+        Column(modifier = Modifier.weight(1f)) {
             if (!channel.capabilities.canSeeRemoteOnlyFiles) {
                 Text(
                     text = "共享目录模式：只能看到本机已有的文件，看不到远端未下载的内容。",

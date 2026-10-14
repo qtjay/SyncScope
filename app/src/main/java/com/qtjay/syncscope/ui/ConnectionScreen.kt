@@ -40,18 +40,14 @@ import com.qtjay.syncscope.channel.ShareChannel
 import com.qtjay.syncscope.channel.SmbChannel
 import com.qtjay.syncscope.channel.SyncChannel
 import com.qtjay.syncscope.channel.TestResult
+import com.qtjay.syncscope.data.ClientProfile
+import com.qtjay.syncscope.data.ProfileKind
+import com.qtjay.syncscope.data.ProfileRole
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private enum class Mode { REST, FTP, SMB, LOCAL }
-
-/**
- * 通道角色。
- *  - INFO：信息面（REST），负责"看"和"触发扫描"
- *  - ACTION：动作面（FTP/SMB/本地目录），负责"真正删文件"
- */
-enum class ChannelRole { INFO, ACTION }
 
 /**
  * 首屏：选择连接方式。
@@ -68,10 +64,11 @@ enum class ChannelRole { INFO, ACTION }
 fun ConnectionScreen(
     title: String = "SyncScope",
     onCancel: (() -> Unit)? = null,
-    onConnected: (SyncChannel, ChannelRole) -> Unit,
+    onConnected: (SyncChannel, ClientProfile) -> Unit,
 ) {
     val context = LocalContext.current
     var mode by remember { mutableStateOf(Mode.REST) }
+    var name by remember { mutableStateOf("") }
     var address by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("8384") }
     var apiKey by remember { mutableStateOf("") }
@@ -144,6 +141,13 @@ fun ConnectionScreen(
                     switchTo(Mode.LOCAL, port)
                 }
             }
+
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("名称（可选，便于区分多个设备）") },
+                modifier = Modifier.fillMaxWidth(),
+            )
 
             when (mode) {
                 Mode.REST -> {
@@ -329,12 +333,39 @@ fun ConnectionScreen(
                         testing = false
                         status = result
                         if (result.ok) {
-                            val role = if (mode == Mode.REST) {
-                                ChannelRole.INFO
-                            } else {
-                                ChannelRole.ACTION
+                            val kind = when (mode) {
+                                Mode.REST -> ProfileKind.REST
+                                Mode.FTP -> ProfileKind.FTP
+                                Mode.SMB -> ProfileKind.SMB
+                                Mode.LOCAL -> ProfileKind.LOCAL
                             }
-                            onConnected(target, role)
+                            val autoName = when (mode) {
+                                Mode.REST -> address.trim()
+                                Mode.FTP -> "FTP ${address.trim()}"
+                                Mode.SMB -> "SMB ${address.trim()}\\${shareName.trim()}"
+                                Mode.LOCAL -> "本地目录"
+                            }
+                            onConnected(
+                                target,
+                                ClientProfile(
+                                    name = name.trim().ifBlank { autoName },
+                                    kind = kind,
+                                    role = if (mode == Mode.REST) {
+                                        ProfileRole.INFO
+                                    } else {
+                                        ProfileRole.ACTION
+                                    },
+                                    host = address.trim(),
+                                    port = port.trim(),
+                                    user = user.trim(),
+                                    secret = if (mode == Mode.REST) apiKey.trim() else password,
+                                    shareName = shareName.trim(),
+                                    domain = domain.trim(),
+                                    path = remotePath.trim(),
+                                    useHttps = useHttps,
+                                    treeUri = shareUri?.toString().orEmpty(),
+                                ),
+                            )
                         }
                     }
                 },
