@@ -1,0 +1,38 @@
+name: Build App
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v6.0.1
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build Debug
+        run: |
+          set -eu
+          BRANCH_BUILD="$(git describe --tags --always 2>/dev/null || true)"
+          echo "BRANCH_BUILD=${BRANCH_BUILD}"
+          ./gradlew --no-daemon assembleDebug -PbranchBuild="${BRANCH_BUILD}"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v5.0.0
+        with:
+          name: syncscope-debug
+          path: app/build/outputs/apk/debug/*.apk

@@ -1,0 +1,107 @@
+name: Release (signed APK)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: syncscope-release
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v6.0.1
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 签名密钥必须跨构建复用：每次重新生成会导致各版本签名不一致，
+      # Android 会拒绝覆盖安装（只能卸载后重装）。
+      - name: Restore signing keystore from cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ runner.temp }}/keystore/syncscope.jks
+          key: syncscope-signing-keystore-v1
+
+      - name: Prepare keystore
+        env:
+          KS_B64: ${{ secrets.FORK_SIGNING_KEYSTORE }}
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/keystore"
+          KS="$RUNNER_TEMP/keystore/syncscope.jks"
+          if [ -n "$KS_B64" ]; then
+            # 优先用仓库 Secret 里的固定密钥：永久有效，不受缓存过期影响
+            printf '%s' "$KS_B64" | base64 -d > "$KS"
+            echo "使用仓库 Secret 中的固定签名密钥"
+          elif [ -s "$KS" ]; then
+            echo "复用缓存的签名密钥"
+          else
+            echo "缓存中没有密钥，生成新的（本次构建结束时会写入缓存供后续复用）"
+            keytool -genkeypair -keystore "$KS" -alias syncscope \
+              -keyalg RSA -keysize 2048 -validity 10950 \
+              -storepass android -keypass android \
+              -dname "CN=SyncScope" -noprompt
+          fi
+
+      - name: Build
+        run: |
+          set -eu
+          BRANCH_BUILD="$(git describe --tags --always 2>/dev/null || true)"
+          echo "BRANCH_BUILD=${BRANCH_BUILD}"
+          ./gradlew --no-daemon assembleDebug -PbranchBuild="${BRANCH_BUILD}"
+
+      - name: Sign APK
+        run: |
+          set -eu
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name apksigner | head -1)"
+          if [ -z "$APKSIGNER" ]; then
+            echo "未找到 apksigner"
+            exit 1
+          fi
+          mkdir -p signed
+          for apk in $(find app/build/outputs -name '*.apk'); do
+            "$APKSIGNER" sign \
+              --ks "$RUNNER_TEMP/keystore/syncscope.jks" \
+              --ks-key-alias syncscope \
+              --ks-pass pass:android --key-pass pass:android \
+              --out "signed/$(basename "$apk")" "$apk"
+          done
+          "$APKSIGNER" verify signed/*.apk
+          ls -la signed
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2.3.5
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: signed/*.apk
+          body: |
+            SyncScope —— 给任意 Syncthing 客户端加上选择性同步。
+
+            ## 功能
+            - 树形浏览目录结构，任意层级勾选文件夹或单个文件
+            - 三态复选：子项部分选中时父项显示「－」
+            - 随时在「选择性同步」与「全部同步」之间切换
+            - 取消勾选时检查远端是否仍有副本，避免误删唯一副本
+            - 两种连接方式：REST API（完整功能）/ 共享目录 SMB+FTP（降级）
+
+            ## 说明
+            - 本应用自身不同步任何文件，只负责配置目标客户端的 `.stignore`
+            - 构建类型：Debug；签名：本仓库自签名（与官方签名不同）
+            - REST 模式需在目标客户端开启「Web UI 远程访问」并填入 API key

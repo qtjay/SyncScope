@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SyncScope</string>
+    <string name="about_title">About</string>
+    <string name="about_branch_version">Branch version</string>
+
+    <string name="conn_title">Connect to Syncthing</string>
+    <string name="conn_mode_rest">REST API (recommended)</string>
+    <string name="conn_mode_share">SMB / FTP folder</string>
+    <string name="conn_address">Address</string>
+    <string name="conn_address_hint">e.g. 192.168.1.10</string>
+    <string name="conn_port">Port</string>
+    <string name="conn_port_hint">Syncthing GUI default: 8384</string>
+    <string name="conn_api_key">API key</string>
+    <string name="conn_api_key_hint">Actions → Settings → GUI → API Key</string>
+    <string name="conn_https">Use HTTPS</string>
+    <string name="conn_share_url">Share URL</string>
+    <string name="conn_share_url_hint">smb://host/share/path or ftp://user:pass@host/path</string>
+    <string name="conn_connect">Connect</string>
+    <string name="conn_testing">Testing…</string>
+    <string name="conn_ok">Connected</string>
+    <string name="conn_failed">Connection failed</string>
+
+    <string name="folder_pick">Choose a folder</string>
+    <string name="folder_empty">No entries. Is the folder still indexing?</string>
+    <string name="folder_loading">Loading…</string>
+    <string name="folder_from_cache">Showing cached structure, refreshing…</string>
+    <string name="folder_inherited">Covered by parent folder</string>
+    <string name="folder_selective_sync">Selective sync</string>
+    <string name="folder_selective_hint">Off means the whole folder syncs. Your selection is kept.</string>
+    <string name="folder_disabled_hint">Selective sync is off: everything will be synced.</string>
+    <string name="folder_new_files_hint">Files added later inside a checked folder are synced automatically.</string>
+    <string name="folder_clear">Clear</string>
+    <string name="folder_save">Save</string>
+    <string name="folder_saved">Saved</string>
+    <string name="folder_saving">Saving…</string>
+
+    <string name="removal_title">Remove unselected content?</string>
+    <string name="removal_safe">Has a copy on another device, safe to remove:</string>
+    <string name="removal_risky">No copy on another device — removing it is risky:</string>
+    <string name="removal_remote_missing">no copy on other devices</string>
+    <string name="removal_keep_selected">Keep selected</string>
+    <string name="removal_force_delete">Delete anyway</string>
+    <string name="removal_deleting">Applying ignore rules, then removing…</string>
+    <string name="removal_deleted">Removed %1$d of %2$d item(s).</string>
+    <string name="removal_delete_failed">Could not remove (in use or no write access):\n%1$s</string>
+</resources>
