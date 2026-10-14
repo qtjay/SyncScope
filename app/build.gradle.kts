@@ -58,4 +58,6 @@ dependencies {
     implementation(libs.core.ktx)
     implementation(libs.gson)
     implementation(libs.documentfile)
+    // FTP 文件通道（SMB 通道随后接入）
+    implementation(libs.commons.net)
 }
