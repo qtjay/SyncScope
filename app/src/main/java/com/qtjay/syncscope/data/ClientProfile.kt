@@ -44,6 +44,11 @@ data class ClientProfile(
     val treeUri: String = "",
     /** ACTION 配置归属于哪个 INFO 配置；为空表示独立使用。 */
     val linkedTo: String = "",
+    /**
+     * ACTION 配置服务于哪个共享文件夹（文件夹 id）。
+     * 文件通道是按"客户端 + 文件夹"配的 —— 不同文件夹可能落在不同的机器上。
+     */
+    val folderId: String = "",
 ) {
     /** 按配置现场构造通道实例。 */
     fun build(context: Context): SyncChannel = when (kind) {

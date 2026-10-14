@@ -80,6 +80,10 @@ fun SyncScopeApp() {
     var status by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf(false) }
     var editingRole by remember { mutableStateOf(ProfileRole.INFO) }
+    /** 抽屉里哪个客户端被展开。 */
+    var expandedId by remember { mutableStateOf<String?>(null) }
+    /** 正在为哪个文件夹配文件通道（文件通道按文件夹归属）。 */
+    var pendingFolderId by remember { mutableStateOf<String?>(null) }
 
     fun persist(list: List<ClientProfile>) {
         profiles = list
@@ -150,15 +154,20 @@ fun SyncScopeApp() {
             onCancel = { editing = false },
             onConnected = { _, profile ->
                 val saved = if (profile.role == ProfileRole.ACTION) {
-                    profile.copy(linkedTo = activeId.orEmpty())
+                    profile.copy(
+                        linkedTo = activeId.orEmpty(),
+                        folderId = pendingFolderId.orEmpty(),
+                    )
                 } else {
                     profile
                 }
                 persist(profiles + saved)
                 editing = false
                 folder = null
+                pendingFolderId = null
                 if (saved.role == ProfileRole.INFO) {
                     activeId = saved.id
+                    expandedId = saved.id
                     actionId = profiles.firstOrNull {
                         it.role == ProfileRole.ACTION && it.linkedTo == saved.id
                     }?.id
@@ -185,6 +194,10 @@ fun SyncScopeApp() {
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
                     )
                     profiles.forEach { profile ->
+                        if (profile.role != ProfileRole.INFO) {
+                            return@forEach
+                        }
+                        val expanded = expandedId == profile.id
                         NavigationDrawerItem(
                             label = {
                                 Column {
@@ -195,30 +208,126 @@ fun SyncScopeApp() {
                                     )
                                 }
                             },
-                            selected = profile.id == activeId || profile.id == actionId,
+                            selected = profile.id == activeId,
                             badge = {
                                 Text(
-                                    profile.roleLabel(),
+                                    if (expanded) "▾" else "▸",
                                     style = MaterialTheme.typography.labelSmall,
                                 )
                             },
                             onClick = {
-                                if (profile.role == ProfileRole.INFO) {
+                                if (activeId != profile.id) {
                                     activeId = profile.id
-                                    actionId = profiles.firstOrNull {
-                                        it.role == ProfileRole.ACTION && it.linkedTo == profile.id
-                                    }?.id
-                                } else {
-                                    actionId = profile.id
-                                    if (profile.linkedTo.isNotBlank()) {
-                                        activeId = profile.linkedTo
-                                    }
+                                    folder = null
                                 }
-                                folder = null
-                                scope.launch { drawerState.close() }
+                                expandedId = if (expanded) null else profile.id
                             },
                         )
+
+                        // 展开后列出该客户端的共享文件夹，以及每个文件夹各自的文件通道
+                        if (expanded && profile.id == activeId) {
+                            folders.forEach { item ->
+                                val status = statuses[item.id]
+                                NavigationDrawerItem(
+                                    label = {
+                                        Column(modifier = Modifier.padding(start = 12.dp)) {
+                                            Text(item.displayName)
+                                            Text(
+                                                if (status != null) {
+                                                    "${status.stateLabel()} · " +
+                                                        "${status.fileSummary()} · " +
+                                                        "${status.completionPercent()}%"
+                                                } else {
+                                                    item.path.ifBlank { "点开可设置选择性同步" }
+                                                },
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
+                                        }
+                                    },
+                                    selected = folder?.id == item.id,
+                                    onClick = {
+                                        folder = item
+                                        // 切到该文件夹时，自动带上它自己的文件通道
+                                        actionId = profiles.firstOrNull {
+                                            it.role == ProfileRole.ACTION &&
+                                                it.linkedTo == profile.id &&
+                                                it.folderId == item.id
+                                        }?.id
+                                        scope.launch { drawerState.close() }
+                                    },
+                                )
+
+                                val channels = profiles.filter {
+                                    it.role == ProfileRole.ACTION &&
+                                        it.linkedTo == profile.id &&
+                                        it.folderId == item.id
+                                }
+                                channels.forEach { channel ->
+                                    NavigationDrawerItem(
+                                        label = {
+                                            Text(
+                                                "　文件通道：${channel.name}",
+                                                modifier = Modifier.padding(start = 12.dp),
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
+                                        },
+                                        selected = actionId == channel.id,
+                                        onClick = {
+                                            actionId = channel.id
+                                            folder = item
+                                            scope.launch { drawerState.close() }
+                                        },
+                                    )
+                                }
+
+                                NavigationDrawerItem(
+                                    label = {
+                                        Text(
+                                            "　＋ 给「${item.displayName}」配文件通道",
+                                            modifier = Modifier.padding(start = 12.dp),
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    },
+                                    selected = false,
+                                    onClick = {
+                                        pendingFolderId = item.id
+                                        editingRole = ProfileRole.ACTION
+                                        editing = true
+                                        scope.launch { drawerState.close() }
+                                    },
+                                )
+                            }
+                        }
                     }
+
+                    // 还没挂到任何客户端下的文件通道独立列出
+                    profiles.forEach { profile ->
+                        if (profile.role == ProfileRole.ACTION && profile.linkedTo.isBlank()) {
+                            NavigationDrawerItem(
+                                label = {
+                                    Column {
+                                        Text(profile.name)
+                                        Text(
+                                            profile.subtitle(),
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    }
+                                },
+                                selected = profile.id == actionId,
+                                badge = {
+                                    Text(
+                                        profile.roleLabel(),
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                },
+                                onClick = {
+                                    actionId = profile.id
+                                    scope.launch { drawerState.close() }
+                                },
+                            )
+                        }
+                    }
+
                     NavigationDrawerItem(
                         label = { Text("＋ 添加客户端配置") },
                         selected = false,
@@ -294,6 +403,7 @@ fun SyncScopeApp() {
                             folderStatus = statuses[current.id],
                             onBack = { folder = null },
                             onAttachFileChannel = {
+                                pendingFolderId = current.id
                                 editingRole = ProfileRole.ACTION
                                 editing = true
                             },
