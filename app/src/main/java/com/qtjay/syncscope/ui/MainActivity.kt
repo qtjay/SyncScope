@@ -4,10 +4,14 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.DrawerValue
@@ -29,6 +33,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -56,11 +61,14 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * 应用外壳：左侧抽屉管理多个客户端配置，随时切换。
+ * 应用外壳。
  *
- * 每个配置可以是信息面（REST）或动作面（FTP/SMB/本地目录），
- * 两者都在时合成 CompositeChannel —— 看走 REST，删走文件通道。
- * 连接成功后会立刻把同步文件夹列表取回来，并提示补一个文件通道。
+ * 左侧抽屉（置顶的汉堡键打开）只管"配置"：内嵌添加/编辑表单 + 已保存配置列表，
+ * 点某条配置即切到它并回到主界面。文件通道不再在抽屉里单独出现，
+ * 它属于某个文件夹，只能从主界面文件夹右侧的编辑按钮进去配。
+ *
+ * 主界面显示取回来的同步文件夹与状态，每行右侧编辑进入该文件夹的
+ * 文件通道 / 选择性同步 / .stignore 三处配置。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,15 +85,16 @@ fun SyncScopeApp() {
     var folders by remember { mutableStateOf<List<Folder>>(emptyList()) }
     var statuses by remember { mutableStateOf<Map<String, FolderStatus>>(emptyMap()) }
     var folder by remember { mutableStateOf<Folder?>(null) }
+    var folderView by remember { mutableStateOf(FolderView.TREE) }
     var status by remember { mutableStateOf<String?>(null) }
+    // 抽屉内的添加/编辑表单
+    var editorOpen by remember { mutableStateOf(false) }
+    var editorInitial by remember { mutableStateOf<ClientProfile?>(null) }
+    // 全屏表单：只用于给某个文件夹配文件通道
     var editing by remember { mutableStateOf(false) }
-    var editingRole by remember { mutableStateOf(ProfileRole.INFO) }
-    /** 抽屉里哪个客户端被展开。 */
-    var expandedId by remember { mutableStateOf<String?>(null) }
-    /** 正在为哪个文件夹配文件通道（文件通道按文件夹归属）。 */
-    var pendingFolderId by remember { mutableStateOf<String?>(null) }
-    /** 正在编辑的已有配置；为空表示新建。 */
     var editingProfile by remember { mutableStateOf<ClientProfile?>(null) }
+    var editingRole by remember { mutableStateOf(ProfileRole.INFO) }
+    var pendingFolderId by remember { mutableStateOf<String?>(null) }
 
     fun persist(list: List<ClientProfile>) {
         profiles = list
@@ -99,13 +108,14 @@ fun SyncScopeApp() {
         folder = null
     }
 
-    // 切换配置 / 点刷新：连上之后立刻取同步文件夹信息
+    // 切换配置 / 点刷新：连上之后立刻取同步文件夹与其状态
     LaunchedEffect(activeId, actionId, reloadKey) {
         val infoProfile = profiles.firstOrNull { it.id == activeId }
         val actionProfile = profiles.firstOrNull { it.id == actionId }
         if (infoProfile == null && actionProfile == null) {
             channel = null
             folders = emptyList()
+            statuses = emptyMap()
             folder = null
             status = null
             return@LaunchedEffect
@@ -155,8 +165,7 @@ fun SyncScopeApp() {
         ConnectionScreen(
             title = when {
                 initial != null -> "编辑配置：${initial.name}"
-                editingRole == ProfileRole.ACTION -> "添加文件通道"
-                else -> "添加客户端配置"
+                else -> "给文件夹配文件通道"
             },
             initial = initial,
             onCancel = {
@@ -166,7 +175,6 @@ fun SyncScopeApp() {
             },
             onConnected = { _, profile ->
                 val saved = when {
-                    // 编辑：沿用原 id 与归属关系，只替换连接参数
                     initial != null -> profile.copy(
                         id = initial.id,
                         role = initial.role,
@@ -174,12 +182,11 @@ fun SyncScopeApp() {
                         folderId = initial.folderId,
                     )
 
-                    profile.role == ProfileRole.ACTION -> profile.copy(
+                    else -> profile.copy(
                         linkedTo = activeId.orEmpty(),
                         folderId = pendingFolderId.orEmpty(),
+                        role = ProfileRole.ACTION,
                     )
-
-                    else -> profile
                 }
                 if (initial != null) {
                     persist(profiles.map { if (it.id == initial.id) saved else it })
@@ -188,18 +195,8 @@ fun SyncScopeApp() {
                 }
                 editing = false
                 editingProfile = null
-                folder = null
                 pendingFolderId = null
-                if (saved.role == ProfileRole.INFO) {
-                    activeId = saved.id
-                    expandedId = saved.id
-                    actionId = profiles.firstOrNull {
-                        it.role == ProfileRole.ACTION && it.linkedTo == saved.id
-                    }?.id
-                } else {
-                    actionId = saved.id
-                }
-                // 改完立刻用新参数重连；编辑时 id 没变，得手动触发一次
+                actionId = saved.id
                 reloadKey++
             },
         )
@@ -214,158 +211,57 @@ fun SyncScopeApp() {
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet {
-                Column(modifier = Modifier.padding(vertical = 12.dp)) {
-                    Text(
-                        "客户端配置",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                    )
-                    profiles.forEach { profile ->
-                        if (profile.role != ProfileRole.INFO) {
-                            return@forEach
-                        }
-                        val expanded = expandedId == profile.id
-                        NavigationDrawerItem(
-                            label = {
-                                Column {
-                                    Text(profile.name)
-                                    Text(
-                                        profile.subtitle(),
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(vertical = 12.dp),
+                ) {
+                    // 置顶：添加配置 / 编辑表单
+                    if (editorOpen) {
+                        ProfileEditor(
+                            initial = editorInitial,
+                            onCancel = {
+                                editorOpen = false
+                                editorInitial = null
                             },
-                            selected = profile.id == activeId,
-                            badge = {
-                                Text(
-                                    if (expanded) "▾" else "▸",
-                                    style = MaterialTheme.typography.labelSmall,
-                                )
-                            },
-                            onClick = {
-                                if (activeId != profile.id) {
-                                    activeId = profile.id
-                                    folder = null
+                            onSaved = { saved ->
+                                val initial = editorInitial
+                                if (initial != null) {
+                                    persist(profiles.map { if (it.id == initial.id) saved else it })
+                                } else {
+                                    persist(profiles + saved)
                                 }
-                                expandedId = if (expanded) null else profile.id
+                                editorOpen = false
+                                editorInitial = null
+                                if (saved.role == ProfileRole.INFO) {
+                                    activeId = saved.id
+                                    actionId = profiles.firstOrNull {
+                                        it.role == ProfileRole.ACTION && it.linkedTo == saved.id
+                                    }?.id
+                                } else {
+                                    actionId = saved.id
+                                }
+                                folder = null
+                                reloadKey++
+                                scope.launch { drawerState.close() }
                             },
                         )
-
-                        if (expanded) {
-                            NavigationDrawerItem(
-                                label = {
-                                    Text(
-                                        "　✎ 编辑「${profile.name}」",
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                },
-                                selected = false,
-                                onClick = {
-                                    editingProfile = profile
-                                    editingRole = profile.role
-                                    editing = true
-                                    scope.launch { drawerState.close() }
-                                },
-                            )
-                        }
-
-                        // 展开后列出该客户端的共享文件夹，以及每个文件夹各自的文件通道
-                        if (expanded && profile.id == activeId) {
-                            folders.forEach { item ->
-                                val status = statuses[item.id]
-                                NavigationDrawerItem(
-                                    label = {
-                                        Column(modifier = Modifier.padding(start = 12.dp)) {
-                                            Text(item.displayName)
-                                            Text(
-                                                if (status != null) {
-                                                    "${status.stateLabel()} · " +
-                                                        "${status.fileSummary()} · " +
-                                                        "${status.completionPercent()}%"
-                                                } else {
-                                                    item.path.ifBlank { "点开可设置选择性同步" }
-                                                },
-                                                style = MaterialTheme.typography.bodySmall,
-                                            )
-                                        }
-                                    },
-                                    selected = folder?.id == item.id,
-                                    onClick = {
-                                        folder = item
-                                        // 切到该文件夹时，自动带上它自己的文件通道
-                                        actionId = profiles.firstOrNull {
-                                            it.role == ProfileRole.ACTION &&
-                                                it.linkedTo == profile.id &&
-                                                it.folderId == item.id
-                                        }?.id
-                                        scope.launch { drawerState.close() }
-                                    },
-                                )
-
-                                val channels = profiles.filter {
-                                    it.role == ProfileRole.ACTION &&
-                                        it.linkedTo == profile.id &&
-                                        it.folderId == item.id
-                                }
-                                channels.forEach { channel ->
-                                    NavigationDrawerItem(
-                                        label = {
-                                            Text(
-                                                "　文件通道：${channel.name}",
-                                                modifier = Modifier.padding(start = 12.dp),
-                                                style = MaterialTheme.typography.bodySmall,
-                                            )
-                                        },
-                                        selected = actionId == channel.id,
-                                        onClick = {
-                                            actionId = channel.id
-                                            folder = item
-                                            scope.launch { drawerState.close() }
-                                        },
-                                    )
-                                    NavigationDrawerItem(
-                                        label = {
-                                            Text(
-                                                "　　✎ 编辑该通道",
-                                                modifier = Modifier.padding(start = 12.dp),
-                                                style = MaterialTheme.typography.bodySmall,
-                                            )
-                                        },
-                                        selected = false,
-                                        onClick = {
-                                            editingProfile = channel
-                                            editingRole = ProfileRole.ACTION
-                                            editing = true
-                                            scope.launch { drawerState.close() }
-                                        },
-                                    )
-                                }
-
-                                NavigationDrawerItem(
-                                    label = {
-                                        Text(
-                                            "　＋ 给「${item.displayName}」配文件通道",
-                                            modifier = Modifier.padding(start = 12.dp),
-                                            style = MaterialTheme.typography.bodySmall,
-                                        )
-                                    },
-                                    selected = false,
-                                    onClick = {
-                                        pendingFolderId = item.id
-                                        editingProfile = null
-                                        editingRole = ProfileRole.ACTION
-                                        editing = true
-                                        scope.launch { drawerState.close() }
-                                    },
-                                )
-                            }
-                        }
+                    } else {
+                        NavigationDrawerItem(
+                            label = { Text("＋ 添加配置") },
+                            selected = false,
+                            onClick = {
+                                editorInitial = null
+                                editorOpen = true
+                            },
+                        )
                     }
 
-                    // 还没挂到任何客户端下的文件通道独立列出
                     profiles.forEach { profile ->
-                        if (profile.role == ProfileRole.ACTION && profile.linkedTo.isBlank()) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             NavigationDrawerItem(
+                                modifier = Modifier.weight(1f),
                                 label = {
                                     Column {
                                         Text(profile.name)
@@ -375,7 +271,7 @@ fun SyncScopeApp() {
                                         )
                                     }
                                 },
-                                selected = profile.id == actionId,
+                                selected = profile.id == activeId || profile.id == actionId,
                                 badge = {
                                     Text(
                                         profile.roleLabel(),
@@ -383,38 +279,32 @@ fun SyncScopeApp() {
                                     )
                                 },
                                 onClick = {
-                                    actionId = profile.id
+                                    if (profile.role == ProfileRole.INFO) {
+                                        activeId = profile.id
+                                        actionId = profiles.firstOrNull {
+                                            it.role == ProfileRole.ACTION && it.linkedTo == profile.id
+                                        }?.id
+                                    } else {
+                                        actionId = profile.id
+                                        if (profile.linkedTo.isNotBlank()) {
+                                            activeId = profile.linkedTo
+                                        }
+                                    }
+                                    folder = null
                                     scope.launch { drawerState.close() }
                                 },
                             )
-                            NavigationDrawerItem(
-                                label = {
-                                    Text(
-                                        "　✎ 编辑「${profile.name}」",
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                },
-                                selected = false,
+                            // 右侧编辑按钮
+                            IconButton(
                                 onClick = {
-                                    editingProfile = profile
-                                    editingRole = ProfileRole.ACTION
-                                    editing = true
-                                    scope.launch { drawerState.close() }
+                                    editorInitial = profile
+                                    editorOpen = true
                                 },
-                            )
+                            ) {
+                                Icon(Icons.Default.Edit, contentDescription = "编辑该配置")
+                            }
                         }
                     }
-
-                    NavigationDrawerItem(
-                        label = { Text("＋ 添加客户端配置") },
-                        selected = false,
-                        onClick = {
-                            editingProfile = null
-                            editingRole = ProfileRole.INFO
-                            editing = true
-                            scope.launch { drawerState.close() }
-                        },
-                    )
                 }
             }
         },
@@ -456,7 +346,7 @@ fun SyncScopeApp() {
                 when {
                     active == null -> {
                         Text(
-                            "还没有配置。点左上角菜单 →「＋ 添加客户端配置」。",
+                            "还没有配置。点左上角菜单 →「＋ 添加配置」。",
                             modifier = Modifier.padding(16.dp),
                         )
                     }
@@ -465,11 +355,14 @@ fun SyncScopeApp() {
                         FolderPickScreen(
                             channel = active,
                             folders = folders,
-                            onPick = { folder = it },
-                            onAddFileChannel = {
-                                editingProfile = null
-                                editingRole = ProfileRole.ACTION
-                                editing = true
+                            statuses = statuses,
+                            onOpen = {
+                                folderView = FolderView.TREE
+                                folder = it
+                            },
+                            onEdit = {
+                                folderView = FolderView.CHANNEL
+                                folder = it
                             },
                             onReload = { reloadKey++ },
                         )
@@ -480,6 +373,7 @@ fun SyncScopeApp() {
                             channel = active,
                             folder = current,
                             folderStatus = statuses[current.id],
+                            initialView = folderView,
                             onBack = { folder = null },
                             onAttachFileChannel = {
                                 pendingFolderId = current.id

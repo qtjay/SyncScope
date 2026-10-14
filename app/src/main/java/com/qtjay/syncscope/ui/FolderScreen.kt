@@ -47,7 +47,7 @@ private class TreeRow(
     var loading: Boolean = false,
 )
 
-private enum class FolderView { TREE, CHANNEL, RULES }
+enum class FolderView { TREE, CHANNEL, RULES }
 
 /**
  * 文件夹详情：选择性同步（目录树）、文件通道、忽略规则原文。
@@ -60,6 +60,8 @@ fun FolderScreen(
     channel: SyncChannel,
     folder: Folder,
     folderStatus: FolderStatus? = null,
+    /** 从主界面右侧"编辑"进来时直接落在文件通道页。 */
+    initialView: FolderView = FolderView.TREE,
     onBack: () -> Unit = {},
     onAttachFileChannel: () -> Unit = {},
 ) {
@@ -73,7 +75,7 @@ fun FolderScreen(
     var loading by remember { mutableStateOf(true) }
     var message by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
-    var view by remember { mutableStateOf(FolderView.TREE) }
+    var view by remember(folder.id, initialView) { mutableStateOf(initialView) }
     var selectiveOn by remember { mutableStateOf(false) }
     var stignoreText by remember { mutableStateOf("") }
 
