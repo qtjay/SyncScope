@@ -18,7 +18,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -35,7 +34,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 
 import com.qtjay.syncscope.channel.FtpChannel
-import com.qtjay.syncscope.channel.RestChannel
 import com.qtjay.syncscope.channel.ShareChannel
 import com.qtjay.syncscope.channel.SmbChannel
 import com.qtjay.syncscope.channel.SyncChannel
@@ -47,15 +45,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private enum class Mode { REST, FTP, SMB, LOCAL }
+private enum class Mode { FTP, SMB, LOCAL }
 
 /**
- * 首屏：选择连接方式。
+ * 给某个同步文件夹配「文件通道」的表单。
  *
- * 两类通道各有长短：
- *   - 信息面（REST）：能看到远端未下载的文件、可触发重扫，但 API 没有删除接口
- *   - 动作面（FTP / SMB / 本地目录）：能写 .stignore 并真正删除文件，
- *     但看不到未下载的内容、也不能触发重扫
+ * 文件通道是 REST API 的补充，只做两件事：浏览真实文件系统上的目录结构、删除文件。
+ * REST 客户端在左侧抽屉里另外添加，不在这里。
  *
  * 连接结果一定会显示：成功给出摘要，失败给出可读原因。
  */
@@ -70,11 +66,11 @@ fun ConnectionScreen(
 ) {
     val context = LocalContext.current
     val startMode = when (initial?.kind) {
-        ProfileKind.REST -> Mode.REST
         ProfileKind.FTP -> Mode.FTP
         ProfileKind.SMB -> Mode.SMB
         ProfileKind.LOCAL -> Mode.LOCAL
-        null -> Mode.REST
+        // 默认落在 SMB：Windows 共享最常见
+        else -> Mode.SMB
     }
     val key = initial?.id
     // key 变化（换了一个配置来编辑）时重新预填，而不是沿用上一次的输入
@@ -85,18 +81,15 @@ fun ConnectionScreen(
         mutableStateOf(
             initial?.port.orEmpty().ifBlank {
                 when (startMode) {
-                    Mode.REST -> "8384"
                     Mode.FTP -> "21"
                     Mode.SMB -> "445"
-                    Mode.LOCAL -> "8384"
+                    Mode.LOCAL -> "445"
                 }
             },
         )
     }
     val startSecret = initial?.secret.orEmpty()
-    var apiKey by remember(key) { mutableStateOf(startSecret) }
     var password by remember(key) { mutableStateOf(startSecret) }
-    var useHttps by remember(key) { mutableStateOf(initial?.useHttps ?: false) }
     var user by remember(key) { mutableStateOf(initial?.user.orEmpty()) }
     var shareName by remember(key) { mutableStateOf(initial?.shareName.orEmpty()) }
     var domain by remember(key) { mutableStateOf(initial?.domain.orEmpty()) }
@@ -111,7 +104,6 @@ fun ConnectionScreen(
     val scope = rememberCoroutineScope()
 
     val ready = when (mode) {
-        Mode.REST -> address.isNotBlank()
         Mode.FTP -> address.isNotBlank()
         Mode.SMB -> address.isNotBlank() && shareName.isNotBlank()
         Mode.LOCAL -> shareUri != null
@@ -155,9 +147,6 @@ fun ConnectionScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                ModeButton("REST", mode == Mode.REST, Modifier.weight(1f)) {
-                    switchTo(Mode.REST, "8384")
-                }
                 ModeButton("FTP", mode == Mode.FTP, Modifier.weight(1f)) {
                     switchTo(Mode.FTP, "21")
                 }
@@ -177,37 +166,6 @@ fun ConnectionScreen(
             )
 
             when (mode) {
-                Mode.REST -> {
-                    OutlinedTextField(
-                        value = address,
-                        onValueChange = { address = it },
-                        label = { Text("地址") },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = port,
-                        onValueChange = { port = it },
-                        label = { Text("端口") },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = apiKey,
-                        onValueChange = { apiKey = it },
-                        label = { Text("API key") },
-                        modifier = Modifier.fillMaxWidth(),
-                        visualTransformation = PasswordVisualTransformation(),
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("使用 HTTPS")
-                        Spacer(Modifier.weight(1f))
-                        Switch(checked = useHttps, onCheckedChange = { useHttps = it })
-                    }
-                    Text(
-                        "需在目标客户端开启 Web UI 远程访问，并填入 API key。",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-
                 Mode.FTP -> {
                     OutlinedTextField(
                         value = address,
@@ -315,15 +273,6 @@ fun ConnectionScreen(
                     testing = true
                     scope.launch {
                         val target: SyncChannel? = when (mode) {
-                            Mode.REST -> RestChannel(
-                                scheme = if (useHttps) "https" else "http",
-                                host = address.trim(),
-                                port = port.trim().toIntOrNull() ?: 8384,
-                                apiKey = apiKey.trim(),
-                                user = user.trim(),
-                                password = password,
-                            )
-
                             Mode.FTP -> FtpChannel(
                                 host = address.trim(),
                                 port = port.trim().toIntOrNull() ?: 21,
@@ -363,13 +312,11 @@ fun ConnectionScreen(
                         status = result
                         if (result.ok) {
                             val kind = when (mode) {
-                                Mode.REST -> ProfileKind.REST
                                 Mode.FTP -> ProfileKind.FTP
                                 Mode.SMB -> ProfileKind.SMB
                                 Mode.LOCAL -> ProfileKind.LOCAL
                             }
                             val autoName = when (mode) {
-                                Mode.REST -> address.trim()
                                 Mode.FTP -> "FTP ${address.trim()}"
                                 Mode.SMB -> "SMB ${address.trim()}\\${shareName.trim()}"
                                 Mode.LOCAL -> "本地目录"
@@ -379,19 +326,14 @@ fun ConnectionScreen(
                                 ClientProfile(
                                     name = name.trim().ifBlank { autoName },
                                     kind = kind,
-                                    role = if (mode == Mode.REST) {
-                                        ProfileRole.INFO
-                                    } else {
-                                        ProfileRole.ACTION
-                                    },
+                                    role = ProfileRole.ACTION,
                                     host = address.trim(),
                                     port = port.trim(),
                                     user = user.trim(),
-                                    secret = if (mode == Mode.REST) apiKey.trim() else password,
+                                    secret = password,
                                     shareName = shareName.trim(),
                                     domain = domain.trim(),
                                     path = remotePath.trim(),
-                                    useHttps = useHttps,
                                     treeUri = shareUri?.toString().orEmpty(),
                                 ),
                             )
@@ -431,9 +373,6 @@ fun ConnectionScreen(
                 )
                 if (!okNow) {
                     val hint = when (mode) {
-                        Mode.REST ->
-                            "提示：REST 模式下目标客户端必须开启「Web UI 远程访问」，" +
-                                "且手机与它处于同一网络。"
                         Mode.FTP ->
                             "提示：请确认 FTP 服务已开启、端口正确，路径用绝对路径。"
                         Mode.SMB ->

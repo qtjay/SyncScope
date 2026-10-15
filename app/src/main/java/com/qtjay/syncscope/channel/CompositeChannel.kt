@@ -91,7 +91,11 @@ class CompositeChannel(
             ?: infoChannel?.takeIf { it.capabilities.canDeleteTargetFiles }
         if (target == null) {
             Log.w(TAG, "没有可用的文件通道，删除跳过；只写入了忽略规则")
-            return DeleteResult(emptyList(), paths)
+            return DeleteResult(
+                emptyList(),
+                paths,
+                paths.associateWith { "没有可用的文件通道（REST 接口不能删文件）" },
+            )
         }
         // 相对路径以文件通道自己的根目录为准：REST 给的 folder.path 是目标设备上的
         // 绝对路径（如 D:\sync、/volume1/sync），直接拼进 SMB/FTP 路径会错，

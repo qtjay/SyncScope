@@ -164,25 +164,48 @@ class SmbChannel(
         val base = folder.path.ifBlank { path }
         val deleted = ArrayList<String>()
         val failed = ArrayList<String>()
+        val reasons = LinkedHashMap<String, String>()
         try {
             withShare<Unit> { share ->
                 // 短路径优先：先删父目录，子项随之消失，
                 // 避免把"已被父目录带走"误报成失败。
                 for (relative in paths.sortedBy { it.length }) {
                     val target = joinIn(base, relative)
-                    val ok = if (share.folderExists(target)) {
-                        runCatching { share.rmdir(target, true) }.isSuccess
-                    } else {
-                        runCatching { share.rm(target) }.isSuccess
+                    val ok = try {
+                        if (share.folderExists(target)) {
+                            share.rmdir(target, true)
+                        } else {
+                            share.rm(target)
+                        }
+                        true
+                    } catch (e: Exception) {
+                        reasons[relative] = e.message ?: e.javaClass.simpleName
+                        false
                     }
-                    if (ok) deleted.add(relative) else failed.add(relative)
+                    if (ok) {
+                        deleted.add(relative)
+                    } else {
+                        failed.add(relative)
+                        if (!reasons.containsKey(relative)) {
+                            reasons[relative] = "SMB 删除失败，服务端未给出原因（路径 $target）"
+                        }
+                    }
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "SMB 删除失败", e)
-            failed.addAll(paths)
+            val why = e.message ?: e.javaClass.simpleName
+            for (relative in paths) {
+                if (deleted.contains(relative)) {
+                    continue
+                }
+                if (!failed.contains(relative)) {
+                    failed.add(relative)
+                }
+                reasons[relative] = why
+            }
         }
-        return DeleteResult(deleted, failed)
+        return DeleteResult(deleted, failed, reasons)
     }
 
     override fun rescan(folderId: String) {

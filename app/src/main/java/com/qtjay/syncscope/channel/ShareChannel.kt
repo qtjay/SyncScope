@@ -121,25 +121,46 @@ class ShareChannel(
     }
 
     override fun delete(folder: Folder, paths: List<String>): DeleteResult {
-        val dir = root() ?: return DeleteResult(emptyList(), paths)
+        val dir = root() ?: return DeleteResult(
+            emptyList(),
+            paths,
+            paths.associateWith { "无法打开所选目录，授权可能已被撤销" },
+        )
         val sorted = paths.sortedBy { it.length }
         val deleted = ArrayList<String>()
         val failed = ArrayList<String>()
+        val reasons = LinkedHashMap<String, String>()
         for (path in sorted) {
             var target: DocumentFile? = dir
             for (segment in path.split('/')) {
+                if (segment.isEmpty()) {
+                    continue
+                }
                 target = target?.findFile(segment)
                 if (target == null) break
             }
+            if (target == null) {
+                failed.add(path)
+                reasons[path] = "所选目录里找不到这一项"
+                continue
+            }
             val ok = try {
-                target?.delete() == true
+                target.delete()
             } catch (e: Exception) {
                 Log.w(TAG, "删除失败: $path", e)
+                reasons[path] = e.message ?: e.javaClass.simpleName
                 false
             }
-            if (ok) deleted.add(path) else failed.add(path)
+            if (ok) {
+                deleted.add(path)
+            } else {
+                failed.add(path)
+                if (!reasons.containsKey(path)) {
+                    reasons[path] = "系统拒绝删除（只读、没有权限或文件正被占用）"
+                }
+            }
         }
-        return DeleteResult(deleted, failed)
+        return DeleteResult(deleted, failed, reasons)
     }
 
     /**

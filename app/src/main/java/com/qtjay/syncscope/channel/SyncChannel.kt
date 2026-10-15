@@ -4,10 +4,16 @@ import com.qtjay.syncscope.core.model.BrowseEntry
 import com.qtjay.syncscope.core.model.Folder
 import com.qtjay.syncscope.core.model.FolderStatus
 
-/** 删除结果。 */
+/**
+ * 删除结果。
+ *
+ * [reasons] 逐条给出失败原因（相对路径 → 服务端返回或异常信息）。
+ * 之前只报"失败了"却不说为什么，用户完全没法自查，所以把原因带上。
+ */
 data class DeleteResult(
     val deleted: List<String>,
     val failed: List<String>,
+    val reasons: Map<String, String> = emptyMap(),
 )
 
 /** 单个文件在全局模型中的信息。 */

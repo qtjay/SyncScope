@@ -152,23 +152,41 @@ class FtpChannel(
         val base = folder.path.ifBlank { remotePath }
         val deleted = ArrayList<String>()
         val failed = ArrayList<String>()
+        val reasons = LinkedHashMap<String, String>()
         try {
             withClient { c ->
                 // 短路径优先：先删父目录，子项随之消失，
                 // 避免把"已被父目录带走"误报成失败。
                 for (path in paths.sortedBy { it.length }) {
-                    if (deletePath(c, join(base, path))) {
+                    val target = join(base, path)
+                    if (deletePath(c, target)) {
                         deleted.add(path)
                     } else {
+                        // 服务端最后一行响应就是真正的失败原因（如 550 Permission denied）
+                        val reply = c.replyString
+                        reasons[path] = if (reply.isNullOrBlank()) {
+                            "FTP 删除失败：服务端未给出原因（路径 $target）"
+                        } else {
+                            "FTP ${reply.trim()}（路径 $target）"
+                        }
                         failed.add(path)
                     }
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "FTP 删除失败", e)
-            failed.addAll(paths)
+            val why = e.message ?: e.javaClass.simpleName
+            for (path in paths) {
+                if (deleted.contains(path)) {
+                    continue
+                }
+                if (!failed.contains(path)) {
+                    failed.add(path)
+                }
+                reasons[path] = why
+            }
         }
-        return DeleteResult(deleted, failed)
+        return DeleteResult(deleted, failed, reasons)
     }
 
     private fun deletePath(c: FTPClient, remote: String): Boolean {

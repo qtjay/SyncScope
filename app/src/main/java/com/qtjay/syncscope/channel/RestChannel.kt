@@ -152,16 +152,22 @@ class RestChannel(
     override fun delete(folder: Folder, paths: List<String>): DeleteResult {
         if (folder.path.isBlank() || !File(folder.path).exists()) {
             Log.w(TAG, "目标路径不在本机，REST 通道无法删除：${folder.path}")
-            return DeleteResult(emptyList(), paths)
+            return DeleteResult(
+                emptyList(),
+                paths,
+                paths.associateWith { "REST 接口没有删除端点，且目标路径不在本机" },
+            )
         }
         // 父路径优先：先删目录，子项随之消失，
         // 避免把"已被父目录带走"误报成失败。
         val sorted = paths.sortedBy { it.length }
         val deleted = ArrayList<String>()
         val failed = ArrayList<String>()
+        val reasons = LinkedHashMap<String, String>()
         for (path in sorted) {
             val file = File(folder.path, path)
             if (!file.exists()) {
+                // 本机没有这一项，不算失败（可能被父目录先带走了）
                 continue
             }
             var ok = deleteRecursively(file)
@@ -178,9 +184,10 @@ class RestChannel(
                 deleted.add(path)
             } else {
                 failed.add(path)
+                reasons[path] = "本地删除失败：文件可能正被 Syncthing 占用或没有写权限"
             }
         }
-        return DeleteResult(deleted, failed)
+        return DeleteResult(deleted, failed, reasons)
     }
 
     override fun rescan(folderId: String) {

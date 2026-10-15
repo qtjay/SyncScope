@@ -116,8 +116,17 @@ fun FolderScreen(
     folderStatus: FolderStatus? = null,
     /** 从主界面右侧"编辑"进来时直接落在文件通道页。 */
     initialView: FolderView = FolderView.TREE,
+    /**
+     * 本文件夹自己的文件通道（SMB/FTP/本地共享目录）。
+     * 它是 API 的补充：用于浏览真实文件系统上的目录结构，以及执行删除。
+     */
+    fileChannel: SyncChannel? = null,
+    /** 文件通道在界面上的名字。 */
+    fileChannelLabel: String? = null,
+    onAddFileChannel: () -> Unit = {},
+    onEditFileChannel: () -> Unit = {},
+    onRemoveFileChannel: () -> Unit = {},
     onBack: () -> Unit = {},
-    onAttachFileChannel: () -> Unit = {},
 ) {
     val appContext = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
@@ -449,8 +458,10 @@ fun FolderScreen(
             val confirmed = ArrayList<String>()
             val missing = ArrayList<String>()
             for (path in paths) {
+                // 删的是文件通道那台设备上的文件，所以问它才作数；
+                // 全局模型（REST）说"存在"只代表集群里某台设备有，不等于通道这边也有。
                 val info = withContext(Dispatchers.IO) {
-                    runCatching { channel.remoteInfo(folder.id, path) }.getOrNull()
+                    runCatching { fileChannel?.remoteInfo(folder.id, path) }.getOrNull()
                 }
                 if (info?.exists == true) {
                     confirmed.add(path)
@@ -470,6 +481,14 @@ fun FolderScreen(
                     "已通过文件通道删除 " + ok + " 项" +
                         (if (bad > 0) "，失败 " + bad + " 项" else ""),
                 )
+                // 失败原因必须显示出来，否则用户只看到"失败"却无从下手
+                val reasons = result?.reasons
+                if (!reasons.isNullOrEmpty()) {
+                    notes.add(
+                        "失败原因：" + reasons.entries.take(3)
+                            .joinToString("；") { "${it.key} → ${it.value}" },
+                    )
+                }
             }
             if (missing.isNotEmpty()) {
                 // 远端没有 → 拒绝删除，同时把 .stignore 里这几项改回同步状态
@@ -703,22 +722,45 @@ fun FolderScreen(
                         .weight(1f)
                         .padding(horizontal = 16.dp),
                 ) {
-                    if (channel.capabilities.canDeleteTargetFiles) {
-                        Text("已连接文件通道：取消勾选后可以真正删除对方磁盘上的文件。")
-                    } else {
+                    val action = fileChannel
+                    if (action == null) {
                         Text(
-                            "还没配文件通道：Syncthing 的 REST 接口没有删除文件的端点，" +
-                            "取消勾选只会写入忽略规则，对方磁盘上的文件仍然保留。",
+                            "这个文件夹还没配文件通道。" +
+                                "Syncthing 的 REST 接口没有删除文件的端点，" +
+                                "没配通道时取消勾选只会写入忽略规则，对方磁盘上的文件仍然保留。",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         OutlinedButton(
-                            onClick = onAttachFileChannel,
+                            onClick = onAddFileChannel,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 8.dp),
                         ) {
                             Text("添加 SMB / FTP / 本地文件通道")
                         }
+                    } else {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                fileChannelLabel ?: "已配文件通道",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            TextButton(onClick = onEditFileChannel) { Text("编辑") }
+                            TextButton(onClick = onRemoveFileChannel) { Text("删除") }
+                        }
+                        Text(
+                            "文件通道用于浏览真实文件系统上的目录结构，以及执行删除。",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(vertical = 4.dp),
+                        )
+                        FileChannelBrowser(
+                            channel = action,
+                            folderId = folder.id,
+                            modifier = Modifier.weight(1f),
+                        )
                     }
                 }
             }
@@ -786,6 +828,109 @@ fun FolderScreen(
                 }
             },
         )
+    }
+}
+
+/**
+ * 用文件通道浏览目标设备上的真实目录结构。
+ *
+ * 这是 REST 看不到的那一面：SMB/FTP/本地共享目录只能看到"实际存在的"文件，
+ * 看不到远端有、本机没下载的内容，但反过来它能确认删除目标到底在不在。
+ */
+@Composable
+private fun FileChannelBrowser(
+    channel: SyncChannel,
+    folderId: String,
+    modifier: Modifier = Modifier,
+) {
+    val scope = rememberCoroutineScope()
+    var path by remember(folderId) { mutableStateOf("") }
+    var entries by remember { mutableStateOf(emptyList<BrowseEntry>()) }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun load(target: String) {
+        scope.launch {
+            loading = true
+            error = null
+            val pair: Pair<List<BrowseEntry>, String?> = withContext(Dispatchers.IO) {
+                try {
+                    Pair(channel.tree(folderId, target), null)
+                } catch (e: Exception) {
+                    Pair(emptyList(), e.message ?: e.javaClass.simpleName)
+                }
+            }
+            entries = pair.first
+            error = pair.second
+            loading = false
+        }
+    }
+
+    LaunchedEffect(folderId, path) { load(path) }
+
+    Column(modifier = modifier) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                if (path.isEmpty()) "根目录 /" else "/$path",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (path.isNotEmpty()) {
+                TextButton(onClick = { path = path.substringBeforeLast('/', "") }) {
+                    Text("返回上级")
+                }
+            }
+            TextButton(onClick = { load(path) }, enabled = !loading) { Text("刷新") }
+        }
+
+        val shown = error
+        if (shown != null) {
+            Text(
+                "列出目录失败：$shown",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(vertical = 4.dp),
+            )
+        } else if (loading && entries.isEmpty()) {
+            Text("加载中…", style = MaterialTheme.typography.bodySmall)
+        } else if (entries.isEmpty()) {
+            Text(
+                "这一层是空的，或路径不对。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        LazyColumn(modifier = Modifier.weight(1f)) {
+            itemsIndexed(entries) { _, entry ->
+                val name = entry.name ?: return@itemsIndexed
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            if (entry.isDirectory()) {
+                                path = if (path.isEmpty()) name else "$path/$name"
+                            }
+                        }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = if (entry.isDirectory()) "$name/" else name,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    if (entry.size > 0L && !entry.isDirectory()) {
+                        Text(
+                            "${entry.size / 1024} KB",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
