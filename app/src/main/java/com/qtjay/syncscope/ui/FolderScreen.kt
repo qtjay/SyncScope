@@ -1,18 +1,32 @@
 package com.qtjay.syncscope.ui
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -28,6 +42,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
@@ -41,6 +56,8 @@ import com.qtjay.syncscope.data.CachedRow
 import com.qtjay.syncscope.data.TreeCache
 import com.qtjay.syncscope.data.TreeSnapshot
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -68,7 +85,98 @@ private data class SelectionSets(
     fun all(): Set<String> = fullDirs + partialDirs + files
 }
 
-enum class FolderView { TREE, CHANNEL, RULES }
+enum class FolderView { TREE, CHANNEL, RULES, CLEANUP }
+
+/** 后台任务进度；total<=0 表示总数未知，走不确定态。 */
+private data class TaskProgress(
+    val label: String,
+    val current: Int,
+    val total: Int,
+) {
+    val fraction: Float
+        get() = if (total > 0) {
+            (current.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+        } else {
+            0f
+        }
+}
+
+/**
+ * 清理时永不触碰的 Syncthing 元数据。
+ * .stignore 删了等于把选择性同步规则清空，.stfolder 删了文件夹会报错，
+ * .stversions 是别人的版本历史，动它代价太大。
+ */
+private val PROTECTED_NAMES = setOf(".stignore", ".stfolder", ".stversions")
+
+/** 列目录时的并发上限：再高容易把 SMB 服务端或手机网络栈压垮。 */
+private const val SCAN_PARALLELISM = 6
+
+/**
+ * 扫描"按当前目录树状态应当忽略、却仍留在目标设备上的文件"。
+ *
+ * <p>判定完全走三桶勾选状态（fullDirs / partialDirs / files），与生成 .stignore
+ * 的是同一份数据，所以不会出现"规则说忽略、界面说同步"的口径打架。
+ * 命中整棵子树的目录不再往下钻 —— 整棵都是多余的，直接整棵删。
+ */
+private suspend fun scanExcess(
+    channel: SyncChannel,
+    folderId: String,
+    selection: SelectionSets,
+    onProgress: (scanned: Int, pending: Int, found: Int) -> Unit,
+): List<String> = withContext(Dispatchers.IO) {
+    val found = ArrayList<String>()
+    var level: List<String> = listOf("")
+    var scanned = 0
+    while (level.isNotEmpty()) {
+        val next = ArrayList<String>()
+        for (chunk in level.chunked(SCAN_PARALLELISM)) {
+            chunk.map { prefix ->
+                async {
+                    val entries = runCatching { channel.tree(folderId, prefix) }
+                        .getOrDefault(emptyList())
+                    for (entry in entries) {
+                        val name = entry.name ?: continue
+                        if (name.isEmpty() || name == "." || name == "..") continue
+                        if (PROTECTED_NAMES.contains(name)) continue
+                        val path = if (prefix.isEmpty()) name else "$prefix/$name"
+                        val dir = entry.isDirectory()
+                        if (isExcess(path, dir, selection)) {
+                            synchronized(found) { found.add(path) }
+                        } else if (dir) {
+                            synchronized(next) { next.add(path) }
+                        }
+                    }
+                }
+            }.awaitAll()
+        }
+        scanned += level.size
+        onProgress(scanned, next.size, found.size)
+        level = next
+    }
+    found.sorted()
+}
+
+/**
+ * 判断某个真实存在的路径是否"多余"—— 即按当前勾选它本不该出现在目标设备上。
+ *
+ * 只有三种情况要保留：整棵子树被放行、自己被放行（目录或文件）、
+ * 或者是某个被放行项的祖先（没有中间目录就进不去）。
+ */
+private fun isExcess(path: String, dir: Boolean, selection: SelectionSets): Boolean {
+    if (selection.fullDirs.contains(path)) return false
+    if (selection.partialDirs.contains(path) || selection.files.contains(path)) return false
+    var slash = path.indexOf('/')
+    while (slash > 0) {
+        if (selection.fullDirs.contains(path.substring(0, slash))) return false
+        slash = path.indexOf('/', slash + 1)
+    }
+    // 目录还可能是"通往被放行项的中间层"，没了它里面的选中项也进不去
+    if (dir) {
+        val prefix = "$path/"
+        if (selection.all().any { it.startsWith(prefix) }) return false
+    }
+    return true
+}
 
 /** 只保留顶层路径：a 与 a/b 同时被取消时，删掉 a 就够了。 */
 private fun topLevelPaths(paths: Set<String>): List<String> {
@@ -151,6 +259,8 @@ fun FolderScreen(
     var confirmDetail by remember { mutableStateOf(emptyList<String>()) }
     /** 文件通道页里"自检"按钮的结果。 */
     var probeText by remember { mutableStateOf<String?>(null) }
+    /** 保存/删除/扫描进行到哪一步了。 */
+    var progress by remember { mutableStateOf<TaskProgress?>(null) }
 
     fun currentSelection(): SelectionSets = SelectionSets(
         fullDirs = fullDirs.keys.toSet(),
@@ -291,6 +401,31 @@ fun FolderScreen(
         stignoreText = lines.joinToString("\n")
         refreshTree()
         applyParsed(SelectiveSyncPatterns.parseManagedBlock(stignoreText))
+    }
+
+    /**
+     * 保存之后用：目录结构没动过，只有规则变了，
+     * 所以只读回 .stignore 反解，不再整棵重拉（那才是耗时大头）。
+     */
+    suspend fun refreshRulesOnly() {
+        val lines = withContext(Dispatchers.IO) {
+            runCatching { channel.ignores(folder.id) }.getOrDefault(emptyList())
+        }
+        stignoreText = lines.joinToString("\n")
+        applyParsed(SelectiveSyncPatterns.parseManagedBlock(stignoreText))
+    }
+
+    /** 某些路径已经从目标设备上消失了，直接从目录树行里摘掉，避免展示与事实不符。 */
+    fun dropRows(paths: Collection<String>) {
+        if (paths.isEmpty()) {
+            return
+        }
+        val gone = paths.toSet()
+        val kept = rows.filter { row ->
+            gone.none { removed -> row.path == removed || row.path.startsWith("$removed/") }
+        }
+        rows.clear()
+        rows.addAll(kept)
     }
 
     fun loadCached() {
@@ -446,46 +581,51 @@ fun FolderScreen(
     }
 
     suspend fun finishSave(text: String) {
-        refreshFromRemote()
+        refreshRulesOnly()
         baseline = currentSelection()
         persist()
         message = text
+        progress = null
         busy = false
     }
 
     /**
-     * 对"本次取消勾选"的顶层路径逐个查远端：
-     * 确认存在的才通过文件通道删除，查不到的拒绝删除并恢复为同步状态。
+     * 删除"本次取消勾选"的顶层路径。
+     *
+     * <p>两步走：先批量核对它们在文件通道那台设备上是否真的存在，
+     * 确认存在的才删，查不到的一律拒绝并恢复为同步状态。
+     * 核对用批量接口 —— 逐条查意味着每条路径一次完整握手，那才是慢的根源。
      */
     fun runDelete(paths: List<String>) {
         busy = true
+        progress = TaskProgress("核对远端文件", 0, paths.size)
         scope.launch {
             val confirmed = ArrayList<String>()
             val missing = LinkedHashMap<String, String>()
-            for (path in paths) {
-                // 删的是文件通道那台设备上的文件，所以问它才作数；
-                // 全局模型（REST）说"存在"只代表集群里某台设备有，不等于通道这边也有。
-                val probe: Pair<RemoteInfo?, String?> = withContext(Dispatchers.IO) {
-                    val ch = fileChannel
-                    if (ch == null) {
-                        Pair(null, "没有配置文件通道，无法核对远端是否存在")
-                    } else {
-                        try {
-                            Pair(ch.remoteInfo(folder.id, path), null)
-                        } catch (e: Exception) {
-                            Pair(null, "核对失败：" + (e.message ?: e.javaClass.simpleName))
-                        }
-                    }
-                }
-                if (probe.first?.exists == true) {
-                    confirmed.add(path)
+            val probed: Map<String, RemoteInfo?> = withContext(Dispatchers.IO) {
+                val ch = fileChannel
+                if (ch == null) {
+                    emptyMap()
                 } else {
-                    // 查不到（确实不存在，或通道判断不了）一律不删，但要把原因说清
-                    missing[path] = probe.second ?: "远端不存在（文件通道里看不到这一项）"
+                    runCatching { ch.remoteInfoBatch(folder.id, paths) }
+                        .getOrDefault(emptyMap())
+                }
+            }
+            for (path in paths) {
+                val info = probed[path]
+                when {
+                    info?.exists == true -> confirmed.add(path)
+                    // 通道为空或查询抛错都查不出来，和"确实不在"区分开说，免得误导排查方向
+                    fileChannel == null ->
+                        missing[path] = "没有配置文件通道，无法核对远端是否存在"
+                    info == null ->
+                        missing[path] = "核对失败：通道查询没有返回结果"
+                    else -> missing[path] = "远端不存在（文件通道里看不到这一项）"
                 }
             }
             val notes = ArrayList<String>()
             if (confirmed.isNotEmpty()) {
+                progress = TaskProgress("正在删除 ${confirmed.size} 项…", 0, 0)
                 val result = withContext(Dispatchers.IO) {
                     runCatching { channel.delete(folder, confirmed) }.getOrNull()
                 }
@@ -498,10 +638,12 @@ fun FolderScreen(
                         "已通过文件通道删除 " + ok + " 项" +
                             (if (bad > 0) "，失败 " + bad + " 项" else ""),
                     )
+                    dropRows(result.deleted)
                     // 失败原因必须显示出来，否则用户只看到"失败"却无从下手
-                    if (result.reasons.isNotEmpty()) {
+                    val reasons = result.reasons
+                    if (reasons.isNotEmpty()) {
                         notes.add(
-                            "失败原因：" + result.reasons.entries.take(3)
+                            "失败原因：" + reasons.entries.take(3)
                                 .joinToString("；") { "${it.key} → ${it.value}" },
                         )
                     }
@@ -534,12 +676,14 @@ fun FolderScreen(
         }
         busy = true
         message = null
+        progress = TaskProgress("正在写入忽略规则…", 0, 0)
         scope.launch {
             val written = withContext(Dispatchers.IO) {
                 channel.writeIgnores(folder.id, buildStignoreText().split("\n"))
         }
             if (!written) {
                 message = "写入 .stignore 失败"
+                progress = null
                 busy = false
                 return@launch
             }
@@ -558,14 +702,16 @@ fun FolderScreen(
                 return@launch
             }
             // 先让通道说出它要去删的真实路径 —— 根配错的话这里一眼就能看出来
-            val detail = withContext(Dispatchers.IO) {
-                removed.map { path ->
-                    runCatching { channel.diagnose(folder, path) }
-                        .getOrElse { "$path\n自检失败：${it.message ?: it.javaClass.simpleName}" }
-                }
+            val probed = withContext(Dispatchers.IO) {
+                runCatching { channel.diagnoseBatch(folder, removed) }
+                    .getOrDefault(emptyMap())
+            }
+            val detail = removed.map { path ->
+                probed[path] ?: "$path\n自检没有返回结果"
             }
             confirmDetail = detail
             confirmPaths = removed
+            progress = null
             busy = false
         }
     }
@@ -597,18 +743,46 @@ fun FolderScreen(
             )
         }
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-            ViewButton("选择性同步", view == FolderView.TREE, Modifier.weight(1f)) {
-                view = FolderView.TREE
+        // 进度条：删除/保存都走网络，不给反馈会让人以为卡死
+        val shownProgress = progress
+        if (shownProgress != null) {
+            TaskProgressBar(
+                progress = shownProgress,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+            )
+            Text(
+                if (shownProgress.total > 0) {
+                    shownProgress.label +
+                        "（${shownProgress.current}/${shownProgress.total}）"
+                } else {
+                    shownProgress.label
+                },
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        }
+
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ViewButton("选择性同步", view == FolderView.TREE, Modifier.weight(1f)) {
+                    view = FolderView.TREE
+                }
+                ViewButton("文件通道", view == FolderView.CHANNEL, Modifier.weight(1f)) {
+                    view = FolderView.CHANNEL
+                }
             }
-            ViewButton("文件通道", view == FolderView.CHANNEL, Modifier.weight(1f)) {
-                view = FolderView.CHANNEL
-            }
-            ViewButton("忽略规则", view == FolderView.RULES, Modifier.weight(1f)) {
-                view = FolderView.RULES
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.padding(top = 6.dp),
+            ) {
+                ViewButton("忽略规则", view == FolderView.RULES, Modifier.weight(1f)) {
+                    view = FolderView.RULES
+                }
+                ViewButton("清理多余文件", view == FolderView.CLEANUP, Modifier.weight(1f)) {
+                    view = FolderView.CLEANUP
+                }
             }
         }
 
@@ -790,7 +964,9 @@ fun FolderScreen(
                                 probeText = null
                                 scope.launch {
                                     probeText = withContext(Dispatchers.IO) {
-                                        runCatching { channel.diagnose(folder, "") }
+                                        runCatching {
+                                        channel.diagnoseBatch(folder, listOf(""))[""]
+                                    }
                                             .getOrElse {
                                                 "自检失败：${it.message ?: it.javaClass.simpleName}"
                                             }
@@ -839,6 +1015,17 @@ fun FolderScreen(
                         Text("重新读取")
                     }
                 }
+            }
+
+            FolderView.CLEANUP -> {
+                CleanupPane(
+                    fileChannel = fileChannel,
+                    folder = folder,
+                    selection = currentSelection(),
+                    onRowsGone = { dropRows(it) },
+                    onMessage = { message = it },
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
 
@@ -889,6 +1076,268 @@ fun FolderScreen(
                 ) {
                     Text("只写规则，不删除")
                 }
+            },
+        )
+    }
+}
+
+/**
+ * 自绘的进度条。
+ *
+ * 不用 LinearProgressIndicator 的 progress 参数：那个重载在不同 material3 版本里
+ * 一个是 Float、一个是 () -> Float，换成自绘就没有兼容坑。
+ * 总数未知（total<=0）时走循环扫动的条纹，表示"还在动"。
+ */
+@Composable
+private fun TaskProgressBar(
+    progress: TaskProgress,
+    modifier: Modifier = Modifier,
+) {
+    val known = progress.total > 0
+    val fraction by animateFloatAsState(
+        targetValue = if (known) progress.fraction else 1f,
+        label = "taskProgress",
+    )
+    val infinite = rememberInfiniteTransition(label = "taskProgressShimmer")
+    val sweep by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "taskProgressSweep",
+    )
+    Box(
+        modifier = modifier
+            .height(6.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        if (known) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(fraction)
+                    .height(6.dp)
+                    .background(MaterialTheme.colorScheme.primary),
+            )
+        } else {
+            // 不确定态：一段固定宽度的色块来回扫
+            val span = 0.35f
+            val start = ((1f - span) * sweep).coerceIn(0f, 1f - span)
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(start)
+                        .height(6.dp),
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(span)
+                        .height(6.dp)
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 「清理多余文件」页。
+ *
+ * <p>用途：.stignore 里已经忽略掉的东西，目标设备上可能还留着实体文件
+ * （比如以前同步过、后来才取消勾选的）。这一页把它们扫出来，允许批量删掉。
+ *
+ * <p>走文件通道而不是 REST：REST 只能看全局模型，删不掉；
+ * 而且这一页关心的正是"磁盘上到底还剩什么"，只有文件通道看得到。
+ */
+@Composable
+private fun CleanupPane(
+    fileChannel: SyncChannel?,
+    folder: Folder,
+    selection: SelectionSets,
+    onRowsGone: (List<String>) -> Unit,
+    onMessage: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scope = rememberCoroutineScope()
+    var excess by remember(folder.id) { mutableStateOf(emptyList<String>()) }
+    var chosen by remember(folder.id) { mutableStateOf(emptySet<String>()) }
+    var scanning by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
+    var progressLabel by remember { mutableStateOf<String?>(null) }
+    var scanned by remember { mutableStateOf(0) }
+    var confirmDelete by remember { mutableStateOf(false) }
+
+    fun scan() {
+        val channel = fileChannel
+        if (channel == null) {
+            onMessage("这个文件夹还没配文件通道，扫不了磁盘上的残留。")
+            return
+        }
+        scanning = true
+        scanned = 0
+        excess = emptyList()
+        chosen = emptySet()
+        progressLabel = "扫描目录…"
+        scope.launch {
+            val found = scanExcess(channel, folder.id, selection) { done, _, hits ->
+                scanned = done
+                progressLabel = "已扫 $done 个目录，发现 $hits 项多余文件"
+            }
+            excess = found
+            chosen = found.toSet()
+            scanning = false
+            progressLabel = null
+        }
+    }
+
+    LaunchedEffect(folder.id, fileChannel) { scan() }
+
+    Column(modifier = modifier.padding(horizontal = 16.dp)) {
+        Text(
+            "按当前目录树状态，下面这些文件本不该出现在目标设备上" +
+                "（已忽略但磁盘上还在）。勾上再删。",
+            style = MaterialTheme.typography.bodySmall,
+        )
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+        ) {
+            OutlinedButton(onClick = { scan() }, enabled = !scanning && !deleting) {
+                Text(if (scanning) "扫描中…" else "重新扫描")
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            TextButton(
+                onClick = {
+                    chosen = if (chosen.size == excess.size) emptySet() else excess.toSet()
+                },
+                enabled = excess.isNotEmpty() && !deleting,
+            ) {
+                Text(if (chosen.size == excess.size && excess.isNotEmpty()) "全不选" else "全选")
+            }
+        }
+
+        val label = progressLabel
+        if (label != null) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(vertical = 6.dp),
+            )
+        }
+
+        when {
+            scanning && excess.isEmpty() -> {
+                Text("扫描中…", modifier = Modifier.padding(16.dp))
+            }
+
+            excess.isEmpty() -> {
+                Text(
+                    "没有多余文件，目标设备上的内容与当前勾选一致。",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(vertical = 12.dp),
+                )
+            }
+
+            else -> {
+                LazyColumn(modifier = Modifier.weight(1f)) {
+                    itemsIndexed(excess) { _, path ->
+                        val on = chosen.contains(path)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !deleting) {
+                                    chosen = if (on) chosen - path else chosen + path
+                                }
+                                .padding(vertical = 4.dp),
+                        ) {
+                            Checkbox(
+                                checked = on,
+                                onCheckedChange = { want ->
+                                    chosen = if (want) chosen + path else chosen - path
+                                },
+                                enabled = !deleting,
+                            )
+                            Text(
+                                path,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (excess.isNotEmpty()) {
+            Button(
+                onClick = { confirmDelete = true },
+                enabled = chosen.isNotEmpty() && !deleting,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+            ) {
+                Text(if (deleting) "删除中…" else "删除选中的 ${chosen.size} 项")
+            }
+        }
+    }
+
+    val goDelete = { // 二次确认后真正动手
+        confirmDelete = false
+        deleting = true
+        scanned = 0
+        progressLabel = "准备删除…"
+        val targets = chosen.toList()
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { fileChannel?.delete(folder.copy(path = ""), targets) }
+                    .getOrNull()
+            }
+            if (result == null) {
+                onMessage("删除失败：文件通道没有返回结果")
+            } else {
+                excess = excess - result.deleted.toSet()
+                chosen = chosen - result.deleted.toSet()
+                onRowsGone(result.deleted)
+                val notes = ArrayList<String>()
+                notes.add("已删除 ${result.deleted.size} 项")
+                if (result.failed.isNotEmpty()) {
+                    notes.add("失败 ${result.failed.size} 项")
+                    if (result.reasons.isNotEmpty()) {
+                        notes.add(
+                            "失败原因：" + result.reasons.entries.take(3)
+                                .joinToString("；") { "${it.key} → ${it.value}" },
+                        )
+                    }
+                }
+                onMessage(notes.joinToString("；"))
+            }
+            deleting = false
+            progressLabel = null
+        }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("确认删除") },
+            text = {
+                Text(
+                    "将从目标设备删除 ${chosen.size} 项，删除后无法恢复：\n" +
+                        chosen.joinToString("\n") { "· " + it },
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = goDelete) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("取消") }
             },
         )
     }

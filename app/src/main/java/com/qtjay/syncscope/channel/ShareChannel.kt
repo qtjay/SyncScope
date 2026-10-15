@@ -163,23 +163,50 @@ class ShareChannel(
         return DeleteResult(deleted, failed, reasons)
     }
 
-    /** 把真实要删的路径打出来，顺带说明在所选目录里找不找得到。 */
-    override fun diagnose(folder: Folder, path: String): String {
-        val root = root() ?: return "打不开所选目录，授权可能已被撤销"
-        var cur: DocumentFile? = root
-        for (seg in path.split('/')) {
-            if (seg.isEmpty()) {
-                continue
+    /** 批量核对：一次打开目录树，逐条走下去，不用每条路径都重新取根目录。 */
+    override fun remoteInfoBatch(folderId: String, paths: List<String>): Map<String, RemoteInfo?> {
+        val root = root() ?: return paths.associateWith { null }
+        val out = LinkedHashMap<String, RemoteInfo?>()
+        for (path in paths) {
+            var current: DocumentFile? = root
+            for (segment in path.split('/')) {
+                if (segment.isEmpty()) {
+                    continue
+                }
+                current = current?.findFile(segment)
+                if (current == null) break
             }
-            cur = cur?.findFile(seg)
-            if (cur == null) break
+            out[path] = current?.let {
+                RemoteInfo(exists = true, directory = it.isDirectory)
+            } ?: RemoteInfo(exists = false)
         }
-        val full = "$treeUri/$path"
-        return when {
-            cur == null -> "$full\n在所选目录里找不到这一项，删除会失败"
-            cur.isDirectory -> "$full\n（目录，能看到）"
-            else -> "$full\n（文件，能看到）"
+        return out
+    }
+
+    /** 把真实要删的路径打出来，顺带说明在所选目录里找不找得到。 */
+    override fun diagnoseBatch(folder: Folder, paths: List<String>): Map<String, String> {
+        val root = root()
+        if (root == null) {
+            return paths.associateWith { "打不开所选目录，授权可能已被撤销" }
         }
+        val out = LinkedHashMap<String, String>()
+        for (path in paths) {
+            var cur: DocumentFile? = root
+            for (seg in path.split('/')) {
+                if (seg.isEmpty()) {
+                    continue
+                }
+                cur = cur?.findFile(seg)
+                if (cur == null) break
+            }
+            val full = "$treeUri/$path"
+            out[path] = when {
+                cur == null -> "$full\n在所选目录里找不到这一项，删除会失败"
+                cur.isDirectory -> "$full\n（目录，能看到）"
+                else -> "$full\n（文件，能看到）"
+            }
+        }
+        return out
     }
 
     /**

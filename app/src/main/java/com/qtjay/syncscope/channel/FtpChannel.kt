@@ -68,6 +68,7 @@ class FtpChannel(
                             } else {
                                 "FILE_INFO_TYPE_FILE"
                             }
+                            size = file.size
                         }
                     }
                 }
@@ -207,30 +208,92 @@ class FtpChannel(
         return c.removeDirectory(remote)
     }
 
-    /** 把真实要删的 FTP 路径打出来，顺带说明现在看不看得见它。 */
-    override fun diagnose(folder: Folder, path: String): String {
-        val base = folder.path.ifBlank { remotePath }
-        val target = join(base, path)
-        if (path.isBlank()) {
-            return "$target\n（通道根目录，即配置的文件夹路径）"
+    /**
+     * 批量核对：一次登录、一次会话查完所有路径。
+     * 按父目录分组，同一层的名字一次 LIST 就能全部比对完成。
+     */
+    override fun remoteInfoBatch(folderId: String, paths: List<String>): Map<String, RemoteInfo?> {
+        if (paths.isEmpty()) {
+            return emptyMap()
         }
-        val name = path.substringAfterLast('/')
-        val parent = join(base, path.substringBeforeLast('/', ""))
+        val out = LinkedHashMap<String, RemoteInfo?>()
+        for (path in paths) {
+            out[path] = null
+        }
+        val byParent = LinkedHashMap<String, MutableList<String>>()
+        for (path in paths) {
+            val name = path.substringAfterLast('/')
+            if (name.isEmpty()) {
+                out[path] = RemoteInfo(exists = false)
+                continue
+            }
+            val parent = path.substringBeforeLast('/', "")
+            byParent.getOrPut(parent) { ArrayList() }.add(path)
+        }
         return try {
-            withClient<String> { c ->
-                val listed = c.listFiles(parent.ifBlank { "." }) ?: emptyArray()
-                val hit = listed.firstOrNull { it.name == name }
-                when {
-                    hit == null ->
-                        "$target\n看不到这一项，删除会失败：" +
-                            "检查「文件夹路径」是否就是同步文件夹根目录"
-                    hit.isDirectory -> "$target\n（目录，能看到）"
-                    else -> "$target\n（文件，能看到）"
+            withClient<Unit> { c ->
+                for ((parent, group) in byParent) {
+                    val listed = c.listFiles(join(remotePath, parent).ifBlank { "." })
+                    for (path in group) {
+                        val name = path.substringAfterLast('/')
+                        val hit = listed?.firstOrNull { it.name == name }
+                        out[path] = if (hit == null) {
+                            RemoteInfo(exists = false)
+                        } else {
+                            RemoteInfo(exists = true, directory = hit.isDirectory)
+                        }
+                    }
+                }
+            }
+            out
+        } catch (e: Exception) {
+            Log.w(TAG, "FTP 批量核对远端状态失败", e)
+            out
+        }
+    }
+
+    /** 把真实要删的 FTP 路径打出来，顺带说明现在看不看得见它。 */
+    override fun diagnoseBatch(folder: Folder, paths: List<String>): Map<String, String> {
+        if (paths.isEmpty()) {
+            return emptyMap()
+        }
+        val base = folder.path.ifBlank { remotePath }
+        val out = LinkedHashMap<String, String>()
+        // 按父目录分组：一次 LIST 就能核对同一层的所有名字
+        val byParent = LinkedHashMap<String, MutableList<String>>()
+        for (path in paths) {
+            val name = path.substringAfterLast('/')
+            if (path.isBlank()) {
+                out[path] = "$base\n（通道根目录，即配置的文件夹路径）"
+                continue
+            }
+            byParent.getOrPut(path.substringBeforeLast('/', "")) { ArrayList() }.add(path)
+        }
+        try {
+            withClient<Unit> { c ->
+                for ((parent, group) in byParent) {
+                    val listed = c.listFiles(join(base, parent).ifBlank { "." })
+                    for (path in group) {
+                        val target = join(base, path)
+                        val name = path.substringAfterLast('/')
+                        val hit = listed?.firstOrNull { it.name == name }
+                        out[path] = when {
+                            hit == null ->
+                                "$target\n看不到这一项，删除会失败：" +
+                                    "检查「文件夹路径」是否就是同步文件夹根目录"
+                            hit.isDirectory -> "$target\n（目录，能看到）"
+                            else -> "$target\n（文件，能看到）"
+                        }
+                    }
                 }
             }
         } catch (e: Exception) {
-            "$target\n查询失败：${e.message ?: e.javaClass.simpleName}"
+            val why = e.message ?: e.javaClass.simpleName
+            for (path in paths) {
+                out[path] = "查询失败：$why"
+            }
         }
+        return out
     }
 
     override fun rescan(folderId: String) {
@@ -264,10 +327,14 @@ class FtpChannel(
         }
     }
 
+    /**
+     * 只规范分隔符，不裁剪内容。
+     * 以前用 isBlank() 判断，遇到名为单个空格的条目会被当成空路径丢掉。
+     */
     private fun join(base: String, child: String): String {
         return when {
-            child.isBlank() -> base
-            base.isBlank() -> child
+            child.isEmpty() -> base
+            base.isEmpty() -> child
             else -> base.trimEnd('/') + "/" + child
         }
     }

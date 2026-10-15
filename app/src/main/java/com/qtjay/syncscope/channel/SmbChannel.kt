@@ -68,16 +68,19 @@ class SmbChannel(
                 val listed = share.list(dir)
                 listed.mapNotNull { info ->
                     val name = info.fileName ?: return@mapNotNull null
-                    if (name == "." || name == "..") {
+                    if (name.isEmpty() || name == "." || name == "..") {
                         null
                     } else {
                         BrowseEntry().apply {
                             this.name = name
-                            type = if (share.folderExists(join2(dir, name))) {
+                            // 目录项自带属性，不再为每个条目多发一次 folderExists 请求
+                            val isDir = info.fileAttributes and FILE_ATTRIBUTE_DIRECTORY != 0L
+                            type = if (isDir) {
                                 BrowseEntry.TYPE_DIRECTORY
                             } else {
                                 "FILE_INFO_TYPE_FILE"
                             }
+                            size = info.endOfFile
                         }
                     }
                 }
@@ -212,25 +215,65 @@ class SmbChannel(
         return DeleteResult(deleted, failed, reasons)
     }
 
-    /** 把真实要删的 UNC 路径打出来，顺带说明现在看不看得见它。 */
-    override fun diagnose(folder: Folder, path: String): String {
-        val base = folder.path.ifBlank { this.path }
-        val target = joinIn(base, path)
-        val unc = "\\\\$host\\$shareName" + if (target.isEmpty()) "" else "\\$target"
-        if (target.isEmpty()) {
-            return "$unc\n（通道根目录，即配置的共享名+子路径）"
+    /**
+     * 批量核对：所有路径共用一次 SMB 会话。
+     * 默认实现是每条路径各建一次连接，目录多的时候握手开销比删除本身还大。
+     */
+    override fun remoteInfoBatch(folderId: String, paths: List<String>): Map<String, RemoteInfo?> {
+        if (paths.isEmpty()) {
+            return emptyMap()
+        }
+        val out = LinkedHashMap<String, RemoteInfo?>()
+        for (path in paths) {
+            out[path] = null
         }
         return try {
-            withShare<String> { share ->
-                when {
-                    share.folderExists(target) -> "$unc\n（目录，能看到）"
-                    share.fileExists(target) -> "$unc\n（文件，能看到）"
-                    else -> "$unc\n看不到这一项，删除会失败：检查共享名/子路径是否就是同步文件夹根目录"
+            withShare<Unit> { share ->
+                for (path in paths) {
+                    val target = join(path)
+                    out[path] = when {
+                        share.folderExists(target) -> RemoteInfo(exists = true, directory = true)
+                        share.fileExists(target) -> RemoteInfo(exists = true, directory = false)
+                        else -> RemoteInfo(exists = false)
+                    }
                 }
+            }
+            out
+        } catch (e: Exception) {
+            Log.w(TAG, "SMB 批量核对远端状态失败", e)
+            out
+        }
+    }
+
+    /** 把真实要删的 UNC 路径打出来，顺带说明现在看不看得见它。 */
+    override fun diagnoseBatch(folder: Folder, paths: List<String>): Map<String, String> {
+        if (paths.isEmpty()) {
+            return emptyMap()
+        }
+        val base = folder.path.ifBlank { this.path }
+        val out = LinkedHashMap<String, String>()
+        return try {
+            withShare<Map<String, String>> { share ->
+                for (path in paths) {
+                    val target = joinIn(base, path)
+                    val unc = "\\\\$host\\$shareName" +
+                        if (target.isEmpty()) "" else "\\$target"
+                    out[path] = when {
+                        target.isEmpty() -> "$unc\n（通道根目录，即配置的共享名+子路径）"
+                        share.folderExists(target) -> "$unc\n（目录，能看到）"
+                        share.fileExists(target) -> "$unc\n（文件，能看到）"
+                        else -> "$unc\n看不到这一项，删除会失败：" +
+                            "检查共享名/子路径是否就是同步文件夹根目录"
+                    }
+                }
+                out
             }
         } catch (e: Exception) {
             val why = e.message ?: e.javaClass.simpleName
-            "$unc\n查询失败：$why"
+            for (path in paths) {
+                out[path] = "查询失败：$why"
+            }
+            out
         }
     }
 
@@ -255,31 +298,29 @@ class SmbChannel(
     }
 
     private fun suffix(): String {
-        val p = normalize(path)
+        val p = path.trim().replace('/', '\\').trim('\\')
         return if (p.isEmpty()) "" else "\\$p"
     }
 
     /** base 目录（配置里的 path）与子路径拼接。 */
     private fun join(child: String): String = joinIn(path, child)
 
-    private fun joinIn(base: String, child: String): String {
-        val b = normalize(base)
-        val c = normalize(child)
-        return when {
-            c.isEmpty() -> b
-            b.isEmpty() -> c
-            else -> "$b\\$c"
-        }
-    }
+    private fun join2(base: String, name: String): String = joinIn(base, name)
 
-    private fun join2(base: String, name: String): String {
-        return joinIn(base, name)
-    }
+    /**
+     * Windows 文件名里不允许出现 / 和 \，所以两者都可以安全地当作分隔符来切分。
+     * 只规范分隔符，绝不动每一段自身的字符。
+     */
+    private fun segments(value: String): List<String> =
+        value.split('\\', '/').filter { it.isNotEmpty() }
 
-    /** SMB 路径用反斜杠分隔，统一把 / 转换掉并去掉首尾多余分隔符。 */
-    private fun normalize(value: String): String {
-        return value.trim().replace('/', '\\').trim('\\')
-    }
+    /**
+     * 关键修正：以前用 String.trim() 规范路径，会把 "名字 " 这类含首尾空格的
+     * 文件名修坏（trim 掉了尾随空格），SMB 侧就变成 STATUS_OBJECT_NAME_NOT_FOUND，
+     * 表现正是"有些文件删不掉"。现在按段拼接，原样保留每一段。
+     */
+    private fun joinIn(base: String, child: String): String =
+        (segments(base) + segments(child)).joinToString("\\")
 
     private fun describe(e: Exception): String {
         val raw = e.message.orEmpty()
@@ -302,6 +343,9 @@ class SmbChannel(
     companion object {
         private const val TAG = "SmbChannel"
         private const val STIGNORE = ".stignore"
+
+        /** FILE_ATTRIBUTE_DIRECTORY */
+        private const val FILE_ATTRIBUTE_DIRECTORY = 0x00000010L
 
         /**
          * 打开文件时声明的共享访问方式。

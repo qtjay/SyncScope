@@ -114,12 +114,15 @@ interface SyncChannel {
     fun delete(folder: Folder, paths: List<String>): DeleteResult
 
     /**
-     * 删除前的自检：把这个通道"会去删哪个路径、现在看不看得见"讲清楚。
+     * 删除前的自检：把"这条通道会去删哪个真实路径、现在看不看得见"讲清楚。
      *
-     * 之前用户只看到"删除失败"四个字，无从判断是路径根配错、权限不足还是文件真不在，
+     * <p>之前用户只看到"删除失败"四个字，无从判断是路径根配错、权限不足还是文件真不在，
      * 所以在确认框里把真实目标路径打出来，让用户一眼看出根配得对不对。
+     *
+     * <p>批量接口：逐条查意味着每条路径一次完整握手，目录一多就慢到没法用。
      */
-    fun diagnose(folder: Folder, path: String): String = "该通道不支持自检"
+    fun diagnoseBatch(folder: Folder, paths: List<String>): Map<String, String> =
+        paths.associateWith { "该通道不支持自检" }
 
     /**
      * 查询某个相对路径在远端是否存在，用于删除前的存在性校验。
@@ -128,6 +131,15 @@ interface SyncChannel {
      * 调用方应当按"未确认存在"处理 —— 也就是不要删。
      */
     fun remoteInfo(folderId: String, path: String): RemoteInfo? = null
+
+    /**
+     * 批量核对多个路径，返回"路径 → 状态"（查不出来则为 null）。
+     *
+     * 默认实现是逐条调用 [remoteInfo]，对 FTP/SMB 意味着每条路径一次完整握手；
+     * 这两个通道已重写成单连接批量查询，大目录时快一个数量级。
+     */
+    fun remoteInfoBatch(folderId: String, paths: List<String>): Map<String, RemoteInfo?> =
+        paths.associateWith { runCatching { remoteInfo(folderId, it) }.getOrNull() }
 
     /** 请求重新扫描（REST 才有实际作用）。 */
     fun rescan(folderId: String)

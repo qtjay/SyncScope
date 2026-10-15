@@ -112,9 +112,11 @@ class CompositeChannel(
         return target.delete(relax(folder, target), paths)
     }
 
-    override fun diagnose(folder: Folder, path: String): String {
-        val target = deleteTarget() ?: return "没有可用的文件通道，删不掉"
-        return target.diagnose(relax(folder, target), path)
+    override fun diagnoseBatch(folder: Folder, paths: List<String>): Map<String, String> {
+        val target = deleteTarget()
+            ?: return paths.associateWith { "没有可用的文件通道，删不掉" }
+        return runCatching { target.diagnoseBatch(relax(folder, target), paths) }
+            .getOrDefault(paths.associateWith { "自检失败" })
     }
 
     override fun rescan(folderId: String) {
@@ -132,6 +134,18 @@ class CompositeChannel(
         return actionChannel?.let {
             runCatching { it.remoteInfo(folderId, path) }.getOrNull()
         }
+    }
+
+    override fun remoteInfoBatch(folderId: String, paths: List<String>): Map<String, RemoteInfo?> {
+        val fromInfo = infoChannel?.let {
+            runCatching { it.remoteInfoBatch(folderId, paths) }.getOrNull()
+        }
+        if (fromInfo != null && fromInfo.values.any { it != null }) {
+            return fromInfo
+        }
+        return actionChannel?.let {
+            runCatching { it.remoteInfoBatch(folderId, paths) }.getOrNull()
+        } ?: emptyMap()
     }
 
     /** 状态只有信息面（REST）拿得到。 */
