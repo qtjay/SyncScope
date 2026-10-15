@@ -163,6 +163,25 @@ class ShareChannel(
         return DeleteResult(deleted, failed, reasons)
     }
 
+    /** 把真实要删的路径打出来，顺带说明在所选目录里找不找得到。 */
+    override fun diagnose(folder: Folder, path: String): String {
+        val root = root() ?: return "打不开所选目录，授权可能已被撤销"
+        var cur: DocumentFile? = root
+        for (seg in path.split('/')) {
+            if (seg.isEmpty()) {
+                continue
+            }
+            cur = cur?.findFile(seg)
+            if (cur == null) break
+        }
+        val full = "$treeUri/$path"
+        return when {
+            cur == null -> "$full\n在所选目录里找不到这一项，删除会失败"
+            cur.isDirectory -> "$full\n（目录，能看到）"
+            else -> "$full\n（文件，能看到）"
+        }
+    }
+
     /**
      * 共享目录通道无法主动触发 Syncthing 重新扫描，
      * 只能等目标客户端自己的 watcher 发现 .stignore 变化后生效。

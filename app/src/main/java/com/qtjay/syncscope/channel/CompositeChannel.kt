@@ -86,9 +86,21 @@ class CompositeChannel(
         } ?: false
     }
 
-    override fun delete(folder: Folder, paths: List<String>): DeleteResult {
-        val target = actionChannel?.takeIf { it.capabilities.canDeleteTargetFiles }
+    /** 真正动手删文件的那条通道：只有动作面做得到。 */
+    private fun deleteTarget(): SyncChannel? =
+        actionChannel?.takeIf { it.capabilities.canDeleteTargetFiles }
             ?: infoChannel?.takeIf { it.capabilities.canDeleteTargetFiles }
+
+    /**
+     * 相对路径以文件通道自己的根目录为准：REST 给的 folder.path 是目标设备上的
+     * 绝对路径（如 D 盘的 sync、/volume1/sync），直接拼进 SMB/FTP 路径会错，
+     * 所以用空 path 让它回落到通道自己配置的根目录。
+     */
+    private fun relax(folder: Folder, target: SyncChannel): Folder =
+        if (target === infoChannel) folder else folder.copy(path = "")
+
+    override fun delete(folder: Folder, paths: List<String>): DeleteResult {
+        val target = deleteTarget()
         if (target == null) {
             Log.w(TAG, "没有可用的文件通道，删除跳过；只写入了忽略规则")
             return DeleteResult(
@@ -97,11 +109,12 @@ class CompositeChannel(
                 paths.associateWith { "没有可用的文件通道（REST 接口不能删文件）" },
             )
         }
-        // 相对路径以文件通道自己的根目录为准：REST 给的 folder.path 是目标设备上的
-        // 绝对路径（如 D:\sync、/volume1/sync），直接拼进 SMB/FTP 路径会错，
-        // 所以用空 path 让它回落到通道自己配置的根目录。
-        val useFolder = if (target === infoChannel) folder else folder.copy(path = "")
-        return target.delete(useFolder, paths)
+        return target.delete(relax(folder, target), paths)
+    }
+
+    override fun diagnose(folder: Folder, path: String): String {
+        val target = deleteTarget() ?: return "没有可用的文件通道，删不掉"
+        return target.diagnose(relax(folder, target), path)
     }
 
     override fun rescan(folderId: String) {

@@ -200,11 +200,37 @@ class FtpChannel(
             if (name.isBlank() || name == "." || name == "..") {
                 continue
             }
-            if (!deletePath(c, "$remote/$name")) {
+            if (!deletePath(c, join(remote, name))) {
                 return false
             }
         }
         return c.removeDirectory(remote)
+    }
+
+    /** 把真实要删的 FTP 路径打出来，顺带说明现在看不看得见它。 */
+    override fun diagnose(folder: Folder, path: String): String {
+        val base = folder.path.ifBlank { remotePath }
+        val target = join(base, path)
+        if (path.isBlank()) {
+            return "$target\n（通道根目录，即配置的文件夹路径）"
+        }
+        val name = path.substringAfterLast('/')
+        val parent = join(base, path.substringBeforeLast('/', ""))
+        return try {
+            withClient<String> { c ->
+                val listed = c.listFiles(parent.ifBlank { "." }) ?: emptyArray()
+                val hit = listed.firstOrNull { it.name == name }
+                when {
+                    hit == null ->
+                        "$target\n看不到这一项，删除会失败：" +
+                            "检查「文件夹路径」是否就是同步文件夹根目录"
+                    hit.isDirectory -> "$target\n（目录，能看到）"
+                    else -> "$target\n（文件，能看到）"
+                }
+            }
+        } catch (e: Exception) {
+            "$target\n查询失败：${e.message ?: e.javaClass.simpleName}"
+        }
     }
 
     override fun rescan(folderId: String) {

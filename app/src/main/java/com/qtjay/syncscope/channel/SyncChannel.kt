@@ -114,6 +114,14 @@ interface SyncChannel {
     fun delete(folder: Folder, paths: List<String>): DeleteResult
 
     /**
+     * 删除前的自检：把这个通道"会去删哪个路径、现在看不看得见"讲清楚。
+     *
+     * 之前用户只看到"删除失败"四个字，无从判断是路径根配错、权限不足还是文件真不在，
+     * 所以在确认框里把真实目标路径打出来，让用户一眼看出根配得对不对。
+     */
+    fun diagnose(folder: Folder, path: String): String = "该通道不支持自检"
+
+    /**
      * 查询某个相对路径在远端是否存在，用于删除前的存在性校验。
      *
      * 返回 null 表示这个通道判断不出来（比如只有 FTP/SMB，看不到全局模型），

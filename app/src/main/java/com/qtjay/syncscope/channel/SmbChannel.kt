@@ -173,9 +173,13 @@ class SmbChannel(
                     val target = joinIn(base, relative)
                     val ok = try {
                         if (share.folderExists(target)) {
-                            share.rmdir(target, true)
+                            // 递归删目录；少数服务端对 rmdir 有额外限制，退一步按文件删再试
+                            runCatching { share.rmdir(target, true) }
+                                .getOrElse { share.rm(target) }
                         } else {
-                            share.rm(target)
+                            // 反过来：列不出来但其实是目录的情况，按目录删再试
+                            runCatching { share.rm(target) }
+                                .getOrElse { share.rmdir(target, true) }
                         }
                         true
                     } catch (e: Exception) {
@@ -206,6 +210,28 @@ class SmbChannel(
             }
         }
         return DeleteResult(deleted, failed, reasons)
+    }
+
+    /** 把真实要删的 UNC 路径打出来，顺带说明现在看不看得见它。 */
+    override fun diagnose(folder: Folder, path: String): String {
+        val base = folder.path.ifBlank { this.path }
+        val target = joinIn(base, path)
+        val unc = "\\\\$host\\$shareName" + if (target.isEmpty()) "" else "\\$target"
+        if (target.isEmpty()) {
+            return "$unc\n（通道根目录，即配置的共享名+子路径）"
+        }
+        return try {
+            withShare<String> { share ->
+                when {
+                    share.folderExists(target) -> "$unc\n（目录，能看到）"
+                    share.fileExists(target) -> "$unc\n（文件，能看到）"
+                    else -> "$unc\n看不到这一项，删除会失败：检查共享名/子路径是否就是同步文件夹根目录"
+                }
+            }
+        } catch (e: Exception) {
+            val why = e.message ?: e.javaClass.simpleName
+            "$unc\n查询失败：$why"
+        }
     }
 
     override fun rescan(folderId: String) {

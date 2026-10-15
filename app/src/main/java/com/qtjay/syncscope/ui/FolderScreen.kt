@@ -31,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
+import com.qtjay.syncscope.channel.RemoteInfo
 import com.qtjay.syncscope.channel.SyncChannel
 import com.qtjay.syncscope.core.model.BrowseEntry
 import com.qtjay.syncscope.core.model.Folder
@@ -146,6 +147,10 @@ fun FolderScreen(
     var view by remember(folder.id, initialView) { mutableStateOf(initialView) }
     var stignoreText by remember { mutableStateOf("") }
     var confirmPaths by remember { mutableStateOf(emptyList<String>()) }
+    /** 确认框里逐条展示"通道会去删哪个路径、现在看不看得见"。 */
+    var confirmDetail by remember { mutableStateOf(emptyList<String>()) }
+    /** 文件通道页里"自检"按钮的结果。 */
+    var probeText by remember { mutableStateOf<String?>(null) }
 
     fun currentSelection(): SelectionSets = SelectionSets(
         fullDirs = fullDirs.keys.toSet(),
@@ -456,18 +461,27 @@ fun FolderScreen(
         busy = true
         scope.launch {
             val confirmed = ArrayList<String>()
-            val missing = ArrayList<String>()
+            val missing = LinkedHashMap<String, String>()
             for (path in paths) {
                 // 删的是文件通道那台设备上的文件，所以问它才作数；
                 // 全局模型（REST）说"存在"只代表集群里某台设备有，不等于通道这边也有。
-                val info = withContext(Dispatchers.IO) {
-                    runCatching { fileChannel?.remoteInfo(folder.id, path) }.getOrNull()
+                val probe: Pair<RemoteInfo?, String?> = withContext(Dispatchers.IO) {
+                    val ch = fileChannel
+                    if (ch == null) {
+                        Pair(null, "没有配置文件通道，无法核对远端是否存在")
+                    } else {
+                        try {
+                            Pair(ch.remoteInfo(folder.id, path), null)
+                        } catch (e: Exception) {
+                            Pair(null, "核对失败：" + (e.message ?: e.javaClass.simpleName))
+                        }
+                    }
                 }
-                if (info?.exists == true) {
+                if (probe.first?.exists == true) {
                     confirmed.add(path)
                 } else {
-                    // 查不到（不存在或判断不了）一律不删
-                    missing.add(path)
+                    // 查不到（确实不存在，或通道判断不了）一律不删，但要把原因说清
+                    missing[path] = probe.second ?: "远端不存在（文件通道里看不到这一项）"
                 }
             }
             val notes = ArrayList<String>()
@@ -475,24 +489,27 @@ fun FolderScreen(
                 val result = withContext(Dispatchers.IO) {
                     runCatching { channel.delete(folder, confirmed) }.getOrNull()
                 }
-                val ok = result?.deleted?.size ?: 0
-                val bad = result?.failed?.size ?: 0
-                notes.add(
-                    "已通过文件通道删除 " + ok + " 项" +
-                        (if (bad > 0) "，失败 " + bad + " 项" else ""),
-                )
-                // 失败原因必须显示出来，否则用户只看到"失败"却无从下手
-                val reasons = result?.reasons
-                if (!reasons.isNullOrEmpty()) {
+                if (result == null) {
+                    notes.add("调用文件通道删除时抛出异常，一项都没删")
+                } else {
+                    val ok = result.deleted.size
+                    val bad = result.failed.size
                     notes.add(
-                        "失败原因：" + reasons.entries.take(3)
-                            .joinToString("；") { "${it.key} → ${it.value}" },
+                        "已通过文件通道删除 " + ok + " 项" +
+                            (if (bad > 0) "，失败 " + bad + " 项" else ""),
                     )
+                    // 失败原因必须显示出来，否则用户只看到"失败"却无从下手
+                    if (result.reasons.isNotEmpty()) {
+                        notes.add(
+                            "失败原因：" + result.reasons.entries.take(3)
+                                .joinToString("；") { "${it.key} → ${it.value}" },
+                        )
+                    }
                 }
             }
             if (missing.isNotEmpty()) {
                 // 远端没有 → 拒绝删除，同时把 .stignore 里这几项改回同步状态
-                for (path in missing) {
+                for (path in missing.keys) {
                     markSelected(path)
                 }
                 val rewritten = buildStignoreText()
@@ -500,7 +517,11 @@ fun FolderScreen(
                     channel.writeIgnores(folder.id, rewritten.split("\n"))
             }
                 withContext(Dispatchers.IO) { channel.rescan(folder.id) }
-                notes.add("${missing.size} 项在远端不存在，已拒绝删除并恢复为同步状态")
+                notes.add(
+                    missing.size.toString() + " 项未删除、已恢复为同步状态：" +
+                        missing.entries.take(3)
+                            .joinToString("；") { "${it.key} → ${it.value}" },
+                )
             }
             finishSave(notes.joinToString("；").ifBlank { "已保存" })
         }
@@ -536,6 +557,14 @@ fun FolderScreen(
                 )
                 return@launch
             }
+            // 先让通道说出它要去删的真实路径 —— 根配错的话这里一眼就能看出来
+            val detail = withContext(Dispatchers.IO) {
+                removed.map { path ->
+                    runCatching { channel.diagnose(folder, path) }
+                        .getOrElse { "$path\n自检失败：${it.message ?: it.javaClass.simpleName}" }
+                }
+            }
+            confirmDetail = detail
             confirmPaths = removed
             busy = false
         }
@@ -756,6 +785,27 @@ fun FolderScreen(
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(vertical = 4.dp),
                         )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedButton(onClick = {
+                                probeText = null
+                                scope.launch {
+                                    probeText = withContext(Dispatchers.IO) {
+                                        runCatching { channel.diagnose(folder, "") }
+                                            .getOrElse {
+                                                "自检失败：${it.message ?: it.javaClass.simpleName}"
+                                            }
+                                    }
+                                }
+                            }) { Text("自检根目录") }
+                        }
+                        val probe = probeText
+                        if (probe != null) {
+                            Text(
+                                probe,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(vertical = 4.dp),
+                            )
+                        }
                         FileChannelBrowser(
                             channel = action,
                             folderId = folder.id,
@@ -800,11 +850,24 @@ fun FolderScreen(
             onDismissRequest = { confirmPaths = emptyList() },
             title = { Text("确认删除远端文件") },
             text = {
-                Text(
-                    "本次取消勾选了 " + confirmPaths.size + " 项，将通过文件通道从目标设备删除：\n" +
-                        confirmPaths.joinToString("\n") { "· " + it } +
-                        "\n\n删除前会再次确认它们在远端确实存在；查不到的会自动恢复为同步状态。",
-                )
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        "本次取消勾选了 " + confirmPaths.size + " 项，" +
+                            "文件通道会去删下面这些路径：",
+                    )
+                    for (line in confirmDetail) {
+                        Text(
+                            "· " + line,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
+                    Text(
+                        "\n删之前会再核一次，查不到的一律不删并恢复为同步状态。",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
             },
             confirmButton = {
                 TextButton(
