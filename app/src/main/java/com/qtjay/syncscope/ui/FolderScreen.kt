@@ -55,7 +55,7 @@ private class TreeRow(
 
 /**
  * 勾选状态，分三桶保存 —— 对应 .stignore 里两种放行规则：
- *  - [fullDirs]：整棵子树都同步（规则里是 `!/x/**`）；
+ *  - [fullDirs]：整棵子树都同步（规则里写成 `!/x/` 再跟两个星号）；
  *  - [partialDirs]：只放行了其中一部分子项（规则里是 `!/x`），目录本身要放行但子项各自算；
  *  - [files]：单个文件被放行。
  */
@@ -257,7 +257,7 @@ fun FolderScreen(
      * 把反解出来的勾选写回界面。
      *
      * <p>没有托管块 = 目标端没有任何忽略规则 = 全部同步 → 所有已加载的行都打勾；
-     * 有托管块时，块里 `!/x/**` 是整棵子树选中，`!/x` 是按类型分别放进部分选中或文件。
+     * 有托管块时，块里带两个星号结尾的那行是整棵子树选中，单独的 `!/x` 是按类型分别放进部分选中或文件。
      */
     fun applyParsed(parsed: SelectiveSyncPatterns.Selection) {
         fullDirs.clear()
@@ -345,7 +345,7 @@ fun FolderScreen(
 
     /**
      * 取消勾选前，先把"整棵子树被选中"的祖先拆成逐项勾选。
-     * 否则 `!/父目录/**` 会把子项一起放行，子项单独取消是不生效的。
+     * 否则「放行父目录整棵子树」那条规则会把子项一起放行，子项单独取消是不生效的。
      */
     suspend fun materializeAncestors(path: String) {
         val comps = path.split("/")
