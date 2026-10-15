@@ -67,7 +67,7 @@ class WebdavChannel(
             propfind(prefix)
         } catch (e: Exception) {
             Log.w(TAG, "WebDAV 列目录失败: $prefix", e)
-            emptyList()
+            return emptyList()
         }
     }
 
@@ -292,7 +292,7 @@ class WebdavChannel(
                 ?.let { it.href to it.dir }
         } catch (e: Exception) {
             Log.w(TAG, "WebDAV 查询失败: $target", e)
-            null
+            return null
         }
     }
 
@@ -335,7 +335,7 @@ class WebdavChannel(
             }
         } catch (e: Exception) {
             Log.w(TAG, "WebDAV 读文件失败: $target", e)
-            null
+            return null
         }
     }
 
@@ -349,7 +349,7 @@ class WebdavChannel(
             }
         } catch (e: Exception) {
             Log.w(TAG, "WebDAV 写文件失败: $target", e)
-            false
+            return false
         }
     }
 
