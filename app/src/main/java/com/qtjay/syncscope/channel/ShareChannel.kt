@@ -61,6 +61,26 @@ class ShareChannel(
         }
     }
 
+    /** 本地共享目录：按选中的那棵树逐级找过去。 */
+    override fun remoteInfo(folderId: String, path: String): RemoteInfo? {
+        val root = root() ?: return null
+        if (path.isBlank()) {
+            return RemoteInfo(exists = true, directory = true)
+        }
+        var current: DocumentFile? = root
+        for (segment in path.split('/')) {
+            if (segment.isEmpty()) {
+                continue
+            }
+            current = current?.findFile(segment)
+            if (current == null) {
+                return RemoteInfo(exists = false)
+            }
+        }
+        val found = current ?: return RemoteInfo(exists = false)
+        return RemoteInfo(exists = true, directory = found.isDirectory)
+    }
+
     override fun ignores(folderId: String): List<String> {
         val dir = root() ?: return emptyList()
         val file = dir.findFile(".stignore") ?: return emptyList()

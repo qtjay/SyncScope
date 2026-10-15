@@ -22,6 +22,24 @@ data class FileInfo(
 }
 
 /**
+ * 某个相对路径在"远端"的状态。
+ *
+ * <p>这里说的远端是全局模型（REST 的 /rest/db/file）：即使本机没下载，
+ * 只要集群里有别的设备持有，exists 也为 true。删除前用它做存在性校验。
+ */
+data class RemoteInfo(
+    val exists: Boolean,
+    val directory: Boolean = false,
+    /** 持有该文件副本的设备 ID 列表。 */
+    val availability: List<String> = emptyList(),
+) {
+    /** 除本机之外是否还有其它设备持有它。 */
+    fun hasRemoteCopy(localDeviceId: String?): Boolean {
+        return availability.any { it != localDeviceId }
+    }
+}
+
+/**
  * 连通性测试结果。
  *
  * 之前 test() 只返回 String?（失败即 null），失败原因全被吞掉，
@@ -88,6 +106,14 @@ interface SyncChannel {
 
     /** 删除文件/目录，返回成功与失败清单。 */
     fun delete(folder: Folder, paths: List<String>): DeleteResult
+
+    /**
+     * 查询某个相对路径在远端是否存在，用于删除前的存在性校验。
+     *
+     * 返回 null 表示这个通道判断不出来（比如只有 FTP/SMB，看不到全局模型），
+     * 调用方应当按"未确认存在"处理 —— 也就是不要删。
+     */
+    fun remoteInfo(folderId: String, path: String): RemoteInfo? = null
 
     /** 请求重新扫描（REST 才有实际作用）。 */
     fun rescan(folderId: String)

@@ -191,6 +191,41 @@ class RestChannel(
         }
     }
 
+    /**
+     * GET /rest/db/file：查某个路径在全局模型里的状态。
+     *
+     * 真机（v2.1.6）实测：
+     *  - 存在 → 200，body 里有 global 与 availability；
+     *  - 不存在 → 404，body 为 "No such object in the index"；
+     *  - global.deleted = true 表示集群里已被删除，等同不存在。
+     * 判断不了（网络异常等）时返回 null，让调用方按"不删"处理。
+     */
+    override fun remoteInfo(folderId: String, path: String): RemoteInfo? {
+        return try {
+            val query = "?folder=" + enc(folderId) + "&file=" + enc(path)
+            val parsed = gson.fromJson(get("/rest/db/file" + query), Map::class.java)
+                ?: return null
+            val global = parsed["global"] as? Map<*, *>
+            val deleted = global?.get("deleted") as? Boolean ?: false
+            val type = global?.get("type") as? String
+            val availability = (parsed["availability"] as? List<*>)?.mapNotNull { item ->
+                (item as? Map<*, *>)?.get("id") as? String
+            } ?: emptyList()
+            RemoteInfo(
+                exists = !deleted,
+                directory = type == BrowseEntry.TYPE_DIRECTORY,
+                availability = availability,
+            )
+        } catch (e: Exception) {
+            if (e.message.orEmpty().contains("HTTP 404")) {
+                RemoteInfo(exists = false)
+            } else {
+                Log.w(TAG, "查询远端状态失败: $path", e)
+                null
+            }
+        }
+    }
+
     /** GET /rest/db/status：文件数、字节数与同步进度。 */
     override fun status(folderId: String): FolderStatus? {
         return try {

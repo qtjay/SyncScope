@@ -78,6 +78,33 @@ class FtpChannel(
         }
     }
 
+    /**
+     * FTP 看不到全局模型，只能就着自己能看到的文件系统判断：
+     * 列父目录再比对名字（直接列文件本身对空目录会误判成不存在）。
+     */
+    override fun remoteInfo(folderId: String, path: String): RemoteInfo? {
+        val name = path.substringAfterLast('/')
+        if (name.isEmpty()) {
+            return null
+        }
+        val parent = path.substringBeforeLast('/', "")
+        return try {
+            withClient<RemoteInfo> { c ->
+                val target = join(remotePath, parent).ifBlank { "." }
+                val listed = c.listFiles(target) ?: emptyArray()
+                val hit = listed.firstOrNull { it.name == name }
+                if (hit == null) {
+                    RemoteInfo(exists = false)
+                } else {
+                    RemoteInfo(exists = true, directory = hit.isDirectory)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "FTP 查询远端状态失败: $path", e)
+            null
+        }
+    }
+
     override fun ignores(folderId: String): List<String> {
         return try {
             withClient<List<String>> { c ->

@@ -88,6 +88,23 @@ class SmbChannel(
         }
     }
 
+    /** SMB 同样看不到全局模型，按共享里的实际文件判断。 */
+    override fun remoteInfo(folderId: String, path: String): RemoteInfo? {
+        return try {
+            withShare<RemoteInfo> { share ->
+                val target = join(path)
+                when {
+                    share.folderExists(target) -> RemoteInfo(exists = true, directory = true)
+                    share.fileExists(target) -> RemoteInfo(exists = true, directory = false)
+                    else -> RemoteInfo(exists = false)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "SMB 查询远端状态失败: $path", e)
+            null
+        }
+    }
+
     override fun ignores(folderId: String): List<String> {
         return try {
             withShare<List<String>> { share ->

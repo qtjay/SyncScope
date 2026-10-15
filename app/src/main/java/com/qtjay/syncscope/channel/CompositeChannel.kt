@@ -104,6 +104,19 @@ class CompositeChannel(
         infoChannel?.rescan(folderId) ?: actionChannel?.rescan(folderId)
     }
 
+    /** 远端文件状态优先问信息面；没有信息面才退到动作面（比如只配了 SMB/FTP）。 */
+    override fun remoteInfo(folderId: String, path: String): RemoteInfo? {
+        val fromInfo = infoChannel?.let {
+            runCatching { it.remoteInfo(folderId, path) }.getOrNull()
+        }
+        if (fromInfo != null) {
+            return fromInfo
+        }
+        return actionChannel?.let {
+            runCatching { it.remoteInfo(folderId, path) }.getOrNull()
+        }
+    }
+
     /** 状态只有信息面（REST）拿得到。 */
     override fun status(folderId: String): FolderStatus? {
         return infoChannel?.status(folderId) ?: actionChannel?.status(folderId)

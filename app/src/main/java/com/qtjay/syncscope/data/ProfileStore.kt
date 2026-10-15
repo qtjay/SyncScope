@@ -7,7 +7,8 @@ import com.google.gson.reflect.TypeToken
 /**
  * 连接配置的本地持久化（SharedPreferences + Gson）。
  *
- * 只存配置本身，不缓存目录树 —— 目录结构以目标客户端的实际情况为准。
+ * 只存配置本身；目录树另有 TreeCache 缓存，但那只是"进入时先填出界面"用的，
+ * 真正的勾选始终以从目标端读回的 .stignore 为准。
  */
 object ProfileStore {
 
