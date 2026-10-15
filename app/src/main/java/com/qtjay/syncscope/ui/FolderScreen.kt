@@ -54,9 +54,9 @@ private class TreeRow(
 )
 
 /**
- * 勾选状态，分三桶保存 —— 对应 .stignore 里两种放行规则：
- *  - [fullDirs]：整棵子树都同步（规则里写成 `!/x/` 再跟两个星号）；
- *  - [partialDirs]：只放行了其中一部分子项（规则里是 `!/x`），目录本身要放行但子项各自算；
+ * 勾选状态，分三桶保存 —— 对应 .stignore 里的两种放行写法：
+ *  - [fullDirs]：整棵子树都同步；
+ *  - [partialDirs]：只放行了其中一部分子项（目录本身要放行，子项各自算）；
  *  - [files]：单个文件被放行。
  */
 private data class SelectionSets(
@@ -69,6 +69,32 @@ private data class SelectionSets(
 
 enum class FolderView { TREE, CHANNEL, RULES }
 
+/** 只保留顶层路径：a 与 a/b 同时被取消时，删掉 a 就够了。 */
+private fun topLevelPaths(paths: Set<String>): List<String> {
+    return paths.filter { path ->
+        paths.none { other -> other != path && path.startsWith("$other/") }
+    }.sortedBy { it.length }
+}
+
+/** 按当前展开层级递归取回所有可见行。 */
+private suspend fun buildVisibleRows(
+    fetch: suspend (String) -> List<TreeRow>,
+    expanded: Set<String>,
+): List<TreeRow> {
+    val out = ArrayList<TreeRow>()
+    suspend fun walk(prefix: String) {
+        for (row in fetch(prefix)) {
+            row.expanded = row.dir && expanded.contains(row.path)
+            out.add(row)
+            if (row.expanded) {
+                walk(row.path)
+            }
+        }
+    }
+    walk("")
+    return out
+}
+
 /**
  * 文件夹详情：目录树（选择性同步）、文件通道、忽略规则原文。
  *
@@ -79,7 +105,7 @@ enum class FolderView { TREE, CHANNEL, RULES }
  *   <li>最后用 `.stignore` 反解出的勾选<b>覆盖</b>缓存值 —— 目标端的规则才是准的。</li>
  * </ol>
  *
- * <p>保存时同样分两步：先把目录树状态编译成 `.stignore` 写进去，
+ * <p>保存分两步：先把目录树状态编译成 `.stignore` 写进去，
  * 再拿"本次取消勾选"的路径逐个去远端核对，确实存在才通过文件通道删除；
  * 查不到的一律拒绝删除、恢复成同步状态并提醒用户。
  */
@@ -166,47 +192,8 @@ fun FolderScreen(
         }
     }
 
-    /** 展开一层。 */
-    fun loadChildren(parentIndex: Int, parent: TreeRow?) {
-        val prefix = parent?.path.orEmpty()
-        if (parent != null) {
-            parent.loading = true
-        }
-        scope.launch {
-            val created = fetchChildren(prefix)
-            val parentDepth = parent?.depth ?: -1
-            val insertAt = parentIndex + 1
-            while (rows.size > insertAt && rows[insertAt].depth > parentDepth) {
-                rows.removeAt(insertAt)
-            }
-            rows.addAll(insertAt, created)
-            if (parent != null) {
-                parent.loading = false
-            }
-            persist()
-        }
-    }
-
-    fun collapse(index: Int, row: TreeRow) {
-        row.expanded = false
-        var removeAt = index + 1
-        while (rows.size > removeAt && rows[removeAt].depth > row.depth) {
-            rows.removeAt(removeAt)
-        }
-        persist()
-    }
-
-    fun onRowClick(index: Int, row: TreeRow) {
-        if (!row.dir) {
-            return
-        }
-        if (row.expanded) {
-            collapse(index, row)
-        } else {
-            row.expanded = true
-            loadChildren(index, row)
-        }
-    }
+    /** 已加载的行里查它是目录还是文件；没加载到就返回 null。 */
+    fun dirKind(path: String): Boolean? = rows.firstOrNull { it.path == path }?.dir
 
     /** 一整棵子树都勾上（目录）。 */
     fun markFull(path: String) {
@@ -218,12 +205,10 @@ fun FolderScreen(
         when (dirKind(path)) {
             true -> markFull(path)
             false -> selectedFiles[path] = true
-            null -> partialDirs[path] = true
+            // 没展开到这一层的路径保持"只放行本身"，语义与原规则一致
+            else -> partialDirs[path] = true
         }
     }
-
-    /** 已加载的行里查它是目录还是文件；没加载到就返回 null。 */
-    fun dirKind(path: String): Boolean? = rows.firstOrNull { it.path == path }?.dir
 
     suspend fun fetchChildren(prefix: String): List<TreeRow> {
         val entries = withContext(Dispatchers.IO) {
@@ -256,8 +241,8 @@ fun FolderScreen(
     /**
      * 把反解出来的勾选写回界面。
      *
-     * <p>没有托管块 = 目标端没有任何忽略规则 = 全部同步 → 所有已加载的行都打勾；
-     * 有托管块时，块里带两个星号结尾的那行是整棵子树选中，单独的 `!/x` 是按类型分别放进部分选中或文件。
+     * <p>没有托管块 = 目标端没有忽略规则 = 全部同步 → 所有已加载的行都打勾；
+     * 有托管块时，整棵子树选中的目录进 fullDirs，其余按已加载的行判断是目录还是文件。
      */
     fun applyParsed(parsed: SelectiveSyncPatterns.Selection) {
         fullDirs.clear()
@@ -279,7 +264,6 @@ fun FolderScreen(
             when (dirKind(path)) {
                 true -> partialDirs[path] = true
                 false -> selectedFiles[path] = true
-                // 没展开到这一层的路径保持"只放行本身"，语义与原规则一致
                 else -> partialDirs[path] = true
             }
         }
@@ -343,9 +327,19 @@ fun FolderScreen(
         return SelectiveSyncPatterns.buildStignore(stignoreText, all, fullDirs.keys.toSet()).text
     }
 
+    /** 已经下钻过、但下面没有任何勾选的目录，不必再保留"只放行本身"。 */
+    fun pruneEmptyPartialDirs() {
+        val expanded = rows.filter { it.expanded }.map { it.path }.toSet()
+        for (path in partialDirs.keys.toList()) {
+            if (expanded.contains(path) && !hasSelectedDescendant(path)) {
+                partialDirs.remove(path)
+            }
+        }
+    }
+
     /**
      * 取消勾选前，先把"整棵子树被选中"的祖先拆成逐项勾选。
-     * 否则「放行父目录整棵子树」那条规则会把子项一起放行，子项单独取消是不生效的。
+     * 否则那条"放行父目录整棵子树"的规则会把子项一起放行，子项单独取消是不生效的。
      */
     suspend fun materializeAncestors(path: String) {
         val comps = path.split("/")
@@ -359,7 +353,11 @@ fun FolderScreen(
                         if (child.path == next) {
                             continue
                         }
-                        if (child.dir) fullDirs[child.path] = true else selectedFiles[child.path] = true
+                        if (child.dir) {
+                            fullDirs[child.path] = true
+                        } else {
+                            selectedFiles[child.path] = true
+                        }
                         partialDirs.remove(child.path)
                     }
                     fullDirs.remove(current)
@@ -370,20 +368,14 @@ fun FolderScreen(
         }
     }
 
-    /** 已经下钻过、但下面没有任何勾选的目录，不必再保留"只放行本身"。 */
-    fun pruneEmptyPartialDirs() {
-        val expanded = rows.filter { it.expanded }.map { it.path }.toSet()
-        for (path in partialDirs.keys.toList()) {
-            if (expanded.contains(path) && !hasSelectedDescendant(path)) {
-                partialDirs.remove(path)
-            }
-        }
-    }
-
     /** 勾选/取消勾选。 */
     fun onToggle(row: TreeRow, wantSelected: Boolean) {
         if (wantSelected) {
-            if (row.dir) markFull(row.path) else selectedFiles[row.path] = true
+            if (row.dir) {
+                markFull(row.path)
+            } else {
+                selectedFiles[row.path] = true
+            }
             persist()
             return
         }
@@ -397,6 +389,48 @@ fun FolderScreen(
         }
     }
 
+    /** 展开一层。 */
+    fun loadChildren(parentIndex: Int, parent: TreeRow?) {
+        val prefix = parent?.path.orEmpty()
+        if (parent != null) {
+            parent.loading = true
+        }
+        scope.launch {
+            val created = fetchChildren(prefix)
+            val parentDepth = parent?.depth ?: -1
+            val insertAt = parentIndex + 1
+            while (rows.size > insertAt && rows[insertAt].depth > parentDepth) {
+                rows.removeAt(insertAt)
+            }
+            rows.addAll(insertAt, created)
+            if (parent != null) {
+                parent.loading = false
+            }
+            persist()
+        }
+    }
+
+    fun collapse(index: Int, row: TreeRow) {
+        row.expanded = false
+        var removeAt = index + 1
+        while (rows.size > removeAt && rows[removeAt].depth > row.depth) {
+            rows.removeAt(removeAt)
+        }
+        persist()
+    }
+
+    fun onRowClick(index: Int, row: TreeRow) {
+        if (!row.dir) {
+            return
+        }
+        if (row.expanded) {
+            collapse(index, row)
+        } else {
+            row.expanded = true
+            loadChildren(index, row)
+        }
+    }
+
     suspend fun finishSave(text: String) {
         refreshFromRemote()
         baseline = currentSelection()
@@ -405,7 +439,10 @@ fun FolderScreen(
         busy = false
     }
 
-    /** 对"本次取消勾选"的顶层路径逐个核对远端，存在才删，不存在则恢复同步。 */
+    /**
+     * 对"本次取消勾选"的顶层路径逐个查远端：
+     * 确认存在的才通过文件通道删除，查不到的拒绝删除并恢复为同步状态。
+     */
     fun runDelete(paths: List<String>) {
         busy = true
         scope.launch {
@@ -435,14 +472,14 @@ fun FolderScreen(
                 )
             }
             if (missing.isNotEmpty()) {
-                // 远端没有 → 拒绝删除，并在 .stignore 里恢复成同步状态
+                // 远端没有 → 拒绝删除，同时把 .stignore 里这几项改回同步状态
                 for (path in missing) {
                     markSelected(path)
                 }
                 val rewritten = buildStignoreText()
                 withContext(Dispatchers.IO) {
                     channel.writeIgnores(folder.id, rewritten.split("\n"))
-                }
+            }
                 withContext(Dispatchers.IO) { channel.rescan(folder.id) }
                 notes.add("${missing.size} 项在远端不存在，已拒绝删除并恢复为同步状态")
             }
@@ -460,13 +497,14 @@ fun FolderScreen(
         scope.launch {
             val written = withContext(Dispatchers.IO) {
                 channel.writeIgnores(folder.id, buildStignoreText().split("\n"))
-            }
+        }
             if (!written) {
                 message = "写入 .stignore 失败"
                 busy = false
                 return@launch
             }
             withContext(Dispatchers.IO) { channel.rescan(folder.id) }
+            // 本次取消勾选的：拿打开时读到的规则做差集
             val removed = topLevelPaths(baseline.all() - currentSelection().all())
             if (removed.isEmpty()) {
                 finishSave("已保存")
@@ -573,7 +611,11 @@ fun FolderScreen(
                                     selectedFiles.clear()
                                 } else {
                                     for (row in rows) {
-                                        if (row.dir) markFull(row.path) else selectedFiles[row.path] = true
+                                        if (row.dir) {
+                                            markFull(row.path)
+                                        } else {
+                                            selectedFiles[row.path] = true
+                                        }
                                     }
                                 }
                                 persist()
@@ -666,7 +708,7 @@ fun FolderScreen(
                     } else {
                         Text(
                             "还没配文件通道：Syncthing 的 REST 接口没有删除文件的端点，" +
-                                "取消勾选只会写入忽略规则，对方磁盘上的文件仍然保留。",
+                            "取消勾选只会写入忽略规则，对方磁盘上的文件仍然保留。",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         OutlinedButton(
@@ -745,32 +787,6 @@ fun FolderScreen(
             },
         )
     }
-}
-
-/** 只保留顶层路径：a 与 a/b 同时被取消时，删掉 a 就够了。 */
-private fun topLevelPaths(paths: Set<String>): List<String> {
-    return paths.filter { path ->
-        paths.none { other -> other != path && path.startsWith("$other/") }
-    }.sortedBy { it.length }
-}
-
-/** 按当前展开层级递归取回所有可见行。 */
-private suspend fun buildVisibleRows(
-    fetch: suspend (String) -> List<TreeRow>,
-    expanded: Set<String>,
-): List<TreeRow> {
-    val out = ArrayList<TreeRow>()
-    suspend fun walk(prefix: String) {
-        for (row in fetch(prefix)) {
-            row.expanded = row.dir && expanded.contains(row.path)
-            out.add(row)
-            if (row.expanded) {
-                walk(row.path)
-            }
-        }
-    }
-    walk("")
-    return out
 }
 
 @Composable
