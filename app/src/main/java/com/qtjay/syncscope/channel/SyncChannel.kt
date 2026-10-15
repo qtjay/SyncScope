@@ -110,8 +110,16 @@ interface SyncChannel {
     /** 写入忽略规则。 */
     fun writeIgnores(folderId: String, lines: List<String>): Boolean
 
-    /** 删除文件/目录，返回成功与失败清单。 */
-    fun delete(folder: Folder, paths: List<String>): DeleteResult
+    /**
+     * 删除文件/目录，返回成功与失败清单。
+     *
+     * @param onProgress 已处理条数 / 总条数；大目录删除要几十秒，没有进度等于卡死观感。
+     */
+    fun delete(
+        folder: Folder,
+        paths: List<String>,
+        onProgress: ((done: Int, total: Int) -> Unit)? = null,
+    ): DeleteResult
 
     /**
      * 删除前的自检：把"这条通道会去删哪个真实路径、现在看不看得见"讲清楚。
@@ -140,6 +148,12 @@ interface SyncChannel {
      */
     fun remoteInfoBatch(folderId: String, paths: List<String>): Map<String, RemoteInfo?> =
         paths.associateWith { runCatching { remoteInfo(folderId, it) }.getOrNull() }
+
+    /**
+     * 目标设备的 Syncthing 设备 ID（只有 REST 通道拿得到）。
+     * 拿不到或还没连过时返回 null。
+     */
+    fun deviceId(): String? = null
 
     /** 请求重新扫描（REST 才有实际作用）。 */
     fun rescan(folderId: String)

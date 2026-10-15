@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -92,6 +93,8 @@ fun SyncScopeApp() {
     // 当前文件夹的文件通道本体，用于浏览与删除前的存在性校验
     var fileChannel by remember { mutableStateOf<SyncChannel?>(null) }
 
+    /** 当前客户端那台设备的 Syncthing 设备 ID（REST 通道连上后才有）。 */
+    var deviceId by remember { mutableStateOf<String?>(null) }
     var folders by remember { mutableStateOf<List<Folder>>(emptyList()) }
     var statuses by remember { mutableStateOf<Map<String, FolderStatus>>(emptyMap()) }
     var folder by remember { mutableStateOf<Folder?>(null) }
@@ -175,6 +178,7 @@ fun SyncScopeApp() {
             }
         }
         infoChannel = ch
+        deviceId = ch?.deviceId()
         folders = list
         statuses = statusMap
         folder = null
@@ -244,6 +248,13 @@ fun SyncScopeApp() {
     }
 
     val activeName = profiles.firstOrNull { it.id == activeId }?.name ?: "SyncScope"
+    // 设备 ID 只有连上后才拿得到，标题上放短 ID，完整 ID 放下面可横滑的一行
+    val activeDeviceId = deviceId
+    val titleText = if (activeDeviceId.isNullOrBlank()) {
+        activeName
+    } else {
+        "$activeName · ${activeDeviceId.take(7)}"
+    }
     // 抽屉里只放客户端（REST）；文件通道属于某个文件夹，不在这里出现
     val clientProfiles = profiles.filter { it.role == ProfileRole.INFO }
 
@@ -330,7 +341,7 @@ fun SyncScopeApp() {
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = { Text(activeName) },
+                    title = { Text(titleText) },
                     navigationIcon = {
                         // 开着的再按一次就关掉 —— 抽屉打开后必须有明确的退路
                         IconButton(
@@ -379,6 +390,18 @@ fun SyncScopeApp() {
                         shown,
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                }
+                // 完整设备 ID 太长，放一行里横滑着看，避免撑破标题栏
+                val fullId = activeDeviceId
+                if (!fullId.isNullOrBlank()) {
+                    Text(
+                        "设备 ID：$fullId",
+                        style = MaterialTheme.typography.labelSmall,
+                        softWrap = false,
+                        modifier = Modifier
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp, vertical = 2.dp),
                     )
                 }
                 // 先拷成局部 val：委托属性没法智能转换成非空

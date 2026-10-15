@@ -487,33 +487,75 @@ fun FolderScreen(
     }
 
     /**
-     * 取消勾选前，先把"整棵子树被选中"的祖先拆成逐项勾选。
-     * 否则那条"放行父目录整棵子树"的规则会把子项一起放行，子项单独取消是不生效的。
+     * 取消勾选前，先把"整棵子树被放行"的祖先逐个拆成逐项放行。
+     *
+     * <p>不拆的话，那条"放行父目录整棵子树"的规则会把子项一起放行，
+     * 子项单独取消是无效的 —— .stignore 首个匹配生效，父规则先命中就轮不到子项。
+     *
+     * <p>这里踩过两个坑，别再犯：
+     * <ol>
+     *   <li>循环必须走到 path 的直接父目录。以前写成 0 until size-1 且在循环头判断，
+     *       两层路径（a/b）时循环体一次都没执行，父目录 a 保持"整棵放行"，
+     *       结果刚取消的 a/b 立刻又被 hasSelectedAncestor 判成 ON，
+     *       表现就是"子目录怎么点都取消不掉"；</li>
+     *   <li>展开时不能预先排除"通往目标那一支"。排除等于把目标的兄弟目录一起误伤，
+     *       导致取消 a/b/c 时 a/b/x 也跟着被取消。
+     *       现在先全部展开，再由 onToggle 单独摘掉目标及其后代。</li>
+     * </ol>
      */
     suspend fun materializeAncestors(path: String) {
         val comps = path.split("/")
-        var current = ""
-        for (index in 0 until comps.size - 1) {
-            val next = if (current.isEmpty()) comps[index] else "$current/${comps[index]}"
-            if (current.isNotEmpty() && fullDirs.containsKey(current)) {
-                val children = fetchChildren(current)
-                if (children.isNotEmpty()) {
-                    for (child in children) {
-                        if (child.path == next) {
-                            continue
-                        }
-                        if (child.dir) {
-                            fullDirs[child.path] = true
-                        } else {
-                            selectedFiles[child.path] = true
-                        }
-                        partialDirs.remove(child.path)
-                    }
-                    fullDirs.remove(current)
-                    partialDirs[current] = true
-                }
+        for (depth in 1 until comps.size) {
+            val ancestor = comps.subList(0, depth).joinToString("/")
+            if (!fullDirs.containsKey(ancestor)) {
+                continue
             }
-            current = next
+            val children = fetchChildren(ancestor)
+            if (children.isEmpty()) {
+                continue
+            }
+            for (child in children) {
+                if (child.dir) {
+                    fullDirs[child.path] = true
+                } else {
+                    selectedFiles[child.path] = true
+                }
+                partialDirs.remove(child.path)
+            }
+            fullDirs.remove(ancestor)
+            partialDirs[ancestor] = true
+        }
+    }
+
+    /**
+     * 把这一项连同它的后代一起从勾选里摘掉。
+     *
+     * 目录整棵取消时，它下面被单独勾选的子项也必须一起摘掉 ——
+     * 父目录被忽略后，子项单独放行在 Syncthing 里根本不生效，
+     * 留着只会让生成的 .stignore 自相矛盾。
+     */
+    fun removeWithDescendants(row: TreeRow) {
+        fullDirs.remove(row.path)
+        partialDirs.remove(row.path)
+        selectedFiles.remove(row.path)
+        if (!row.dir) {
+            return
+        }
+        val prefix = row.path + "/"
+        for (path in fullDirs.keys.toList()) {
+            if (path.startsWith(prefix)) {
+                fullDirs.remove(path)
+            }
+        }
+        for (path in partialDirs.keys.toList()) {
+            if (path.startsWith(prefix)) {
+                partialDirs.remove(path)
+            }
+        }
+        for (path in selectedFiles.keys.toList()) {
+            if (path.startsWith(prefix)) {
+                selectedFiles.remove(path)
+            }
         }
     }
 
@@ -530,9 +572,7 @@ fun FolderScreen(
         }
         scope.launch {
             materializeAncestors(row.path)
-            fullDirs.remove(row.path)
-            partialDirs.remove(row.path)
-            selectedFiles.remove(row.path)
+            removeWithDescendants(row)
             pruneEmptyPartialDirs()
             persist()
         }
@@ -626,8 +666,17 @@ fun FolderScreen(
             val notes = ArrayList<String>()
             if (confirmed.isNotEmpty()) {
                 progress = TaskProgress("正在删除 ${confirmed.size} 项…", 0, 0)
+                // 大目录要删几千个文件，逐条刷新界面会把主线程刷死，按 50 条节流
+                var reported = 0
                 val result = withContext(Dispatchers.IO) {
-                    runCatching { channel.delete(folder, confirmed) }.getOrNull()
+                    runCatching {
+                        channel.delete(folder, confirmed) { done, total ->
+                            if (done - reported >= 50 || done == total) {
+                                reported = done
+                                progress = TaskProgress("正在删除文件", done, total)
+                            }
+                        }
+                    }.getOrNull()
                 }
                 if (result == null) {
                     notes.add("调用文件通道删除时抛出异常，一项都没删")
@@ -1297,9 +1346,16 @@ private fun CleanupPane(
         progressLabel = "准备删除…"
         val targets = chosen.toList()
         scope.launch {
+            var reported = 0
             val result = withContext(Dispatchers.IO) {
-                runCatching { fileChannel?.delete(folder.copy(path = ""), targets) }
-                    .getOrNull()
+                runCatching {
+                    fileChannel?.delete(folder.copy(path = ""), targets) { done, total ->
+                        if (done - reported >= 50 || done == total) {
+                            reported = done
+                            progressLabel = "正在删除 $done/$total"
+                        }
+                    }
+                }.getOrNull()
             }
             if (result == null) {
                 onMessage("删除失败：文件通道没有返回结果")

@@ -149,7 +149,11 @@ class FtpChannel(
         }
     }
 
-    override fun delete(folder: Folder, paths: List<String>): DeleteResult {
+    override fun delete(
+        folder: Folder,
+        paths: List<String>,
+        onProgress: ((Int, Int) -> Unit)?,
+    ): DeleteResult {
         val base = folder.path.ifBlank { remotePath }
         val deleted = ArrayList<String>()
         val failed = ArrayList<String>()
@@ -158,6 +162,7 @@ class FtpChannel(
             withClient { c ->
                 // 短路径优先：先删父目录，子项随之消失，
                 // 避免把"已被父目录带走"误报成失败。
+                var done = 0
                 for (path in paths.sortedBy { it.length }) {
                     val target = join(base, path)
                     if (deletePath(c, target)) {
@@ -172,6 +177,8 @@ class FtpChannel(
                         }
                         failed.add(path)
                     }
+                    done++
+                    onProgress?.invoke(done, paths.size)
                 }
             }
         } catch (e: Exception) {

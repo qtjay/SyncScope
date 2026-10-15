@@ -48,6 +48,12 @@ class RestChannel(
     @Volatile
     private var csrfToken: String? = null
 
+    /** 目标设备的完整设备 ID，连上之后才有。 */
+    @Volatile
+    private var myId: String? = null
+
+    override fun deviceId(): String? = myId
+
     override val capabilities = Capabilities(
         canSeeRemoteOnlyFiles = true,
         canTriggerRescan = true,
@@ -67,6 +73,7 @@ class RestChannel(
             if (id.isNullOrBlank()) {
                 TestResult.fail("连上了，但响应里没有 myID，可能不是 Syncthing 的 GUI 端口")
             } else {
+                myId = id
                 TestResult.ok("设备已连接，ID ${id.take(7)}…")
             }
         } catch (e: Exception) {
@@ -149,7 +156,11 @@ class RestChannel(
      * 若目标 Syncthing 跑在另一台设备，folder.path 在本机并不存在，
      * 这里会原样返回全部 failed，真正的远程删除由 SMB/FTP 通道负责。
      */
-    override fun delete(folder: Folder, paths: List<String>): DeleteResult {
+    override fun delete(
+        folder: Folder,
+        paths: List<String>,
+        onProgress: ((Int, Int) -> Unit)?,
+    ): DeleteResult {
         if (folder.path.isBlank() || !File(folder.path).exists()) {
             Log.w(TAG, "目标路径不在本机，REST 通道无法删除：${folder.path}")
             return DeleteResult(
@@ -161,6 +172,7 @@ class RestChannel(
         // 父路径优先：先删目录，子项随之消失，
         // 避免把"已被父目录带走"误报成失败。
         val sorted = paths.sortedBy { it.length }
+        var done = 0
         val deleted = ArrayList<String>()
         val failed = ArrayList<String>()
         val reasons = LinkedHashMap<String, String>()
@@ -186,6 +198,8 @@ class RestChannel(
                 failed.add(path)
                 reasons[path] = "本地删除失败：文件可能正被 Syncthing 占用或没有写权限"
             }
+            done++
+            onProgress?.invoke(done, sorted.size)
         }
         return DeleteResult(deleted, failed, reasons)
     }

@@ -99,7 +99,11 @@ class CompositeChannel(
     private fun relax(folder: Folder, target: SyncChannel): Folder =
         if (target === infoChannel) folder else folder.copy(path = "")
 
-    override fun delete(folder: Folder, paths: List<String>): DeleteResult {
+    override fun delete(
+        folder: Folder,
+        paths: List<String>,
+        onProgress: ((Int, Int) -> Unit)?,
+    ): DeleteResult {
         val target = deleteTarget()
         if (target == null) {
             Log.w(TAG, "没有可用的文件通道，删除跳过；只写入了忽略规则")
@@ -109,7 +113,7 @@ class CompositeChannel(
                 paths.associateWith { "没有可用的文件通道（REST 接口不能删文件）" },
             )
         }
-        return target.delete(relax(folder, target), paths)
+        return target.delete(relax(folder, target), paths, onProgress)
     }
 
     override fun diagnoseBatch(folder: Folder, paths: List<String>): Map<String, String> {
@@ -147,6 +151,9 @@ class CompositeChannel(
             runCatching { it.remoteInfoBatch(folderId, paths) }.getOrNull()
         } ?: emptyMap()
     }
+
+    /** 设备 ID 只有信息面（REST）拿得到。 */
+    override fun deviceId(): String? = infoChannel?.deviceId()
 
     /** 状态只有信息面（REST）拿得到。 */
     override fun status(folderId: String): FolderStatus? {

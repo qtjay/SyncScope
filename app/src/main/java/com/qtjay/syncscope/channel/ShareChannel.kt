@@ -120,7 +120,11 @@ class ShareChannel(
         }
     }
 
-    override fun delete(folder: Folder, paths: List<String>): DeleteResult {
+    override fun delete(
+        folder: Folder,
+        paths: List<String>,
+        onProgress: ((Int, Int) -> Unit)?,
+    ): DeleteResult {
         val dir = root() ?: return DeleteResult(
             emptyList(),
             paths,
@@ -130,6 +134,7 @@ class ShareChannel(
         val deleted = ArrayList<String>()
         val failed = ArrayList<String>()
         val reasons = LinkedHashMap<String, String>()
+        var done = 0
         for (path in sorted) {
             var target: DocumentFile? = dir
             for (segment in path.split('/')) {
@@ -159,6 +164,8 @@ class ShareChannel(
                     reasons[path] = "系统拒绝删除（只读、没有权限或文件正被占用）"
                 }
             }
+            done++
+            onProgress?.invoke(done, sorted.size)
         }
         return DeleteResult(deleted, failed, reasons)
     }
