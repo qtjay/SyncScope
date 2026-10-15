@@ -63,11 +63,12 @@ class WebdavChannel(
     }
 
     override fun tree(folderId: String, prefix: String): List<BrowseEntry> {
+        // try 作为表达式：catch 分支直接给值，不要再写 return
         return try {
             propfind(prefix)
         } catch (e: Exception) {
             Log.w(TAG, "WebDAV 列目录失败: $prefix", e)
-            return emptyList()
+            emptyList()
         }
     }
 
@@ -275,7 +276,7 @@ class WebdavChannel(
                 .sortedWith(compareBy({ !it.isDirectory() }, { it.name.orEmpty() }))
         } catch (e: Exception) {
             Log.w(TAG, "WebDAV 列目录失败: $prefix", e)
-            emptyList()
+            return emptyList()
         }
     }
 
@@ -291,7 +292,8 @@ class WebdavChannel(
                 .firstOrNull { it.href == target || it.href == target + "/" }
                 ?.let { it.href to it.dir }
         } catch (e: Exception) {
-            Log.w(TAG, "WebDAV 查询失败: $target", e)
+            // catch 里访问不到 try 块内的 target，只能用函数参数
+            Log.w(TAG, "WebDAV 查询失败: $relative", e)
             return null
         }
     }
