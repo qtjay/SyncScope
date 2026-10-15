@@ -114,6 +114,8 @@ class WebdavChannel(
                     null
                 }
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "WebDAV 批量核对失败", e)
         }
         return out
     }
@@ -202,6 +204,8 @@ class WebdavChannel(
                     reasons[relative] = error
                 }
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "WebDAV 删除失败", e)
         }
         return DeleteResult(deleted, failed, reasons)
     }
@@ -232,6 +236,8 @@ class WebdavChannel(
                     "$full\n查询失败：${e.message ?: e.javaClass.simpleName}"
                 }
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "WebDAV 自检失败", e)
         }
         return out
     }
@@ -267,6 +273,9 @@ class WebdavChannel(
                     }
                 }
                 .sortedWith(compareBy({ !it.isDirectory() }, { it.name.orEmpty() }))
+        } catch (e: Exception) {
+            Log.w(TAG, "WebDAV 列目录失败: $prefix", e)
+            emptyList()
         }
     }
 
@@ -281,6 +290,9 @@ class WebdavChannel(
             return parseMultistatus(pair.second)
                 .firstOrNull { it.href == target || it.href == target + "/" }
                 ?.let { it.href to it.dir }
+        } catch (e: Exception) {
+            Log.w(TAG, "WebDAV 查询失败: $target", e)
+            null
         }
     }
 
@@ -321,6 +333,9 @@ class WebdavChannel(
                 }
                 return it.body?.string()
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "WebDAV 读文件失败: $target", e)
+            null
         }
     }
 
@@ -332,6 +347,9 @@ class WebdavChannel(
             response.use {
                 return it.code in 200..299 || it.code == 201 || it.code == 204
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "WebDAV 写文件失败: $target", e)
+            false
         }
     }
 
