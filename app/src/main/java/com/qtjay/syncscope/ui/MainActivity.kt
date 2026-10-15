@@ -4,7 +4,6 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -93,8 +92,6 @@ fun SyncScopeApp() {
     // 当前文件夹的文件通道本体，用于浏览与删除前的存在性校验
     var fileChannel by remember { mutableStateOf<SyncChannel?>(null) }
 
-    /** 当前客户端那台设备的 Syncthing 设备 ID（REST 通道连上后才有）。 */
-    var deviceId by remember { mutableStateOf<String?>(null) }
     var folders by remember { mutableStateOf<List<Folder>>(emptyList()) }
     var statuses by remember { mutableStateOf<Map<String, FolderStatus>>(emptyMap()) }
     var folder by remember { mutableStateOf<Folder?>(null) }
@@ -178,10 +175,28 @@ fun SyncScopeApp() {
             }
         }
         infoChannel = ch
-        deviceId = ch?.deviceId()
         folders = list
         statuses = statusMap
         folder = null
+        // 连上之后把"设备名 · 短ID"回写成配置名，省得自己起名字还要记设备是哪台。
+        // 只在没自动命名过时写一次，之后用户想怎么改都不再动它。
+        if (ch != null && infoProfile != null && !infoProfile.autoNamed) {
+            val id = ch.deviceId()
+            if (!id.isNullOrBlank()) {
+                val short = id.take(7)
+                val device = ch.deviceName()
+                val auto = if (device.isNullOrBlank()) short else "$device · $short"
+                persist(
+                    profiles.map {
+                        if (it.id == infoProfile.id) {
+                            it.copy(name = auto, autoNamed = true)
+                        } else {
+                            it
+                        }
+                    },
+                )
+            }
+        }
         status = when {
             ch == null -> "配置无效，请重新添加"
             result == null -> "连接失败"
@@ -247,14 +262,9 @@ fun SyncScopeApp() {
         return
     }
 
+    // 配置名本身已经是"设备名 · 短ID"（连上时回写），标题直接用它
     val activeName = profiles.firstOrNull { it.id == activeId }?.name ?: "SyncScope"
-    // 设备 ID 只有连上后才拿得到，标题上放短 ID，完整 ID 放下面可横滑的一行
-    val activeDeviceId = deviceId
-    val titleText = if (activeDeviceId.isNullOrBlank()) {
-        activeName
-    } else {
-        "$activeName · ${activeDeviceId.take(7)}"
-    }
+    val titleText = activeName
     // 抽屉里只放客户端（REST）；文件通道属于某个文件夹，不在这里出现
     val clientProfiles = profiles.filter { it.role == ProfileRole.INFO }
 
@@ -278,7 +288,15 @@ fun SyncScopeApp() {
                             },
                             onSaved = { saved ->
                                 val initial = editorInitial
-                                val client = saved.copy(role = ProfileRole.INFO)
+                                val client = saved.copy(
+                                    role = ProfileRole.INFO,
+                                    // 用户改过名字就别再被自动命名覆盖；没改则沿用原标记
+                                    autoNamed = if (initial == null) {
+                                        false
+                                    } else {
+                                        initial.autoNamed || saved.name != initial.name
+                                    },
+                                )
                                 if (initial != null) {
                                     persist(profiles.map { if (it.id == initial.id) client else it })
                                 } else {
@@ -392,18 +410,7 @@ fun SyncScopeApp() {
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     )
                 }
-                // 完整设备 ID 太长，放一行里横滑着看，避免撑破标题栏
-                val fullId = activeDeviceId
-                if (!fullId.isNullOrBlank()) {
-                    Text(
-                        "设备 ID：$fullId",
-                        style = MaterialTheme.typography.labelSmall,
-                        softWrap = false,
-                        modifier = Modifier
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 16.dp, vertical = 2.dp),
-                    )
-                }
+                // ID 已经写进配置名称了，主页不再重复展示
                 // 先拷成局部 val：委托属性没法智能转换成非空
                 val info = infoChannel
                 val current = folder

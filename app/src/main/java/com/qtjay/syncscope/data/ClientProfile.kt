@@ -61,6 +61,11 @@ data class ClientProfile(
      * 文件通道是按"客户端 + 文件夹"配的 —— 不同文件夹可能落在不同的机器上。
      */
     val folderId: String = "",
+    /**
+     * 名称是否已由本应用按"设备名 · 短ID"自动填过。
+     * 填过之后不再自动改写 —— 否则用户自己起的名字每次重连都会被覆盖掉。
+     */
+    val autoNamed: Boolean = false,
 ) {
     /** 按配置现场构造通道实例。 */
     fun build(context: Context): SyncChannel = when (kind) {

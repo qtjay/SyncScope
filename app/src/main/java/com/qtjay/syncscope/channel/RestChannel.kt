@@ -52,7 +52,43 @@ class RestChannel(
     @Volatile
     private var myId: String? = null
 
+    /** 目标设备报出来的名字，取自 /rest/config 里 devices 中 deviceID == myID 的那一条。 */
+    @Volatile
+    private var myName: String? = null
+
     override fun deviceId(): String? = myId
+
+    /**
+     * 设备名不在 /rest/system/status 里，而在 /rest/config 的 devices 数组里，
+     * 要按 deviceID 等于自己的 myID 挑出来 —— 拿错了会显示成对端的名字。
+     */
+    override fun deviceName(): String? {
+        val id = myId ?: return null
+        myName?.let { return it }
+        return try {
+            val parsed = gson.fromJson(get("/rest/config"), Map::class.java)
+            val devices = parsed?.get("devices") as? List<*>
+            var found: String? = null
+            if (devices != null) {
+                for (item in devices) {
+                    val device = item as? Map<*, *> ?: continue
+                    if (device["deviceID"] as? String != id) {
+                        continue
+                    }
+                    val name = device["name"] as? String
+                    if (!name.isNullOrBlank()) {
+                        found = name
+                    }
+                    break
+                }
+            }
+            myName = found
+            found
+        } catch (e: Exception) {
+            Log.w(TAG, "读取设备名失败", e)
+            null
+        }
+    }
 
     override val capabilities = Capabilities(
         canSeeRemoteOnlyFiles = true,
@@ -74,7 +110,8 @@ class RestChannel(
                 TestResult.fail("连上了，但响应里没有 myID，可能不是 Syncthing 的 GUI 端口")
             } else {
                 myId = id
-                TestResult.ok("设备已连接，ID ${id.take(7)}…")
+                // ID 不在这里展示：连接成功后会把它并进配置名称，主页上再显示就重复了
+                TestResult.ok("设备已连接")
             }
         } catch (e: Exception) {
             Log.w(TAG, "连接测试失败", e)

@@ -155,6 +155,8 @@ class CompositeChannel(
     /** 设备 ID 只有信息面（REST）拿得到。 */
     override fun deviceId(): String? = infoChannel?.deviceId()
 
+    override fun deviceName(): String? = infoChannel?.deviceName()
+
     /** 状态只有信息面（REST）拿得到。 */
     override fun status(folderId: String): FolderStatus? {
         return infoChannel?.status(folderId) ?: actionChannel?.status(folderId)

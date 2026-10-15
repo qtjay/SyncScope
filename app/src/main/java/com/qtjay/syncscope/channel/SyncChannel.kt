@@ -155,6 +155,12 @@ interface SyncChannel {
      */
     fun deviceId(): String? = null
 
+    /**
+     * 目标设备自己报的设备名（只有 REST 通道拿得到）。
+     * 拿不到返回 null —— 调用方要能接受没有名字、只用短 ID 的情况。
+     */
+    fun deviceName(): String? = null
+
     /** 请求重新扫描（REST 才有实际作用）。 */
     fun rescan(folderId: String)
 
