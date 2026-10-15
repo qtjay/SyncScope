@@ -1288,7 +1288,9 @@ private fun CleanupPane(
         }
     }
 
-    val goDelete = { // 二次确认后真正动手
+    // 显式声明返回 Unit：否则会被推断成 () -> Job（末尾 scope.launch），
+    // 与 onClick 的 () -> Unit 对不上，编译报错 ARGUMENT_TYPE_MISMATCH。
+    val goDelete: () -> Unit = {
         confirmDelete = false
         deleting = true
         scanned = 0
