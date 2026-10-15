@@ -103,11 +103,11 @@ class WebdavChannel(
                         RemoteInfo(exists = false)
                     } else {
                         val parsed = parseMultistatus(body)
-                        val self = parsed.firstOrNull { it.first == item }
+                        val self = parsed.firstOrNull { it.href == item }
                         if (self == null) {
                             RemoteInfo(exists = false)
                         } else {
-                            RemoteInfo(exists = true, directory = self.second)
+                            RemoteInfo(exists = true, directory = self.dir)
                         }
                     }
                 } catch (e: Exception) {
@@ -219,10 +219,10 @@ class WebdavChannel(
                     if (pair.first == 404) {
                         "$full\n看不到这一项，删除会失败：检查基础路径是否就是同步文件夹"
                     } else {
-                        val self = parseMultistatus(pair.second).firstOrNull { it.first == item }
+                        val self = parseMultistatus(pair.second).firstOrNull { it.href == item }
                         if (self == null) {
                             "$full\n看不到这一项，删除会失败：检查基础路径是否就是同步文件夹"
-                        } else if (self.second) {
+                        } else if (self.dir) {
                             "$full\n（目录，能看到）"
                         } else {
                             "$full\n（文件，能看到）"
@@ -279,8 +279,8 @@ class WebdavChannel(
                 return null
             }
             return parseMultistatus(pair.second)
-                .firstOrNull { it.first == target || it.first == target + "/" }
-                ?.let { it.first to it.second }
+                .firstOrNull { it.href == target || it.href == target + "/" }
+                ?.let { it.href to it.dir }
         }
     }
 
