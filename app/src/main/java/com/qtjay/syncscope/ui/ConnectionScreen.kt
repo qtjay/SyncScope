@@ -320,6 +320,8 @@ fun ConnectionScreen(
                                 host = address.trim(),
                                 port = port.trim().toIntOrNull() ?: 8384,
                                 apiKey = apiKey.trim(),
+                                user = user.trim(),
+                                password = password,
                             )
 
                             Mode.FTP -> FtpChannel(

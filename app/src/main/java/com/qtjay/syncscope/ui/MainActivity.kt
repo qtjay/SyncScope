@@ -2,6 +2,7 @@ package com.qtjay.syncscope.ui
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -95,6 +96,13 @@ fun SyncScopeApp() {
     var editingProfile by remember { mutableStateOf<ClientProfile?>(null) }
     var editingRole by remember { mutableStateOf(ProfileRole.INFO) }
     var pendingFolderId by remember { mutableStateOf<String?>(null) }
+
+    // 全屏配置页（给文件夹配文件通道）时，返回键先退回主界面
+    BackHandler(enabled = editing) {
+        editing = false
+        editingProfile = null
+        pendingFolderId = null
+    }
 
     fun persist(list: List<ClientProfile>) {
         profiles = list
@@ -314,8 +322,18 @@ fun SyncScopeApp() {
                 TopAppBar(
                     title = { Text(activeName) },
                     navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, contentDescription = "打开配置列表")
+                        // 开着的再按一次就关掉 —— 抽屉打开后必须有明确的退路
+                        IconButton(
+                            onClick = {
+                                scope.launch {
+                                    if (drawerState.isOpen) drawerState.close() else drawerState.open()
+                                }
+                            },
+                        ) {
+                            Icon(
+                                Icons.Default.Menu,
+                                contentDescription = if (drawerState.isOpen) "收起配置列表" else "打开配置列表",
+                            )
                         }
                     },
                     actions = {
@@ -332,6 +350,18 @@ fun SyncScopeApp() {
                 )
             },
         ) { padding ->
+            // 返回键的优先级：抽屉里的表单 → 抽屉本身 → 文件夹详情页 → 系统默认（退出）
+            BackHandler(enabled = drawerState.isOpen) {
+                if (editorOpen) {
+                    editorOpen = false
+                    editorInitial = null
+                } else {
+                    scope.launch { drawerState.close() }
+                }
+            }
+            BackHandler(enabled = !drawerState.isOpen && folder != null) {
+                folder = null
+            }
             Column(modifier = Modifier.fillMaxSize().padding(padding)) {
                 val shown = status
                 if (shown != null) {

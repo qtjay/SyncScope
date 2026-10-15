@@ -27,6 +27,7 @@ import com.qtjay.syncscope.channel.TestResult
 import com.qtjay.syncscope.data.ClientProfile
 import com.qtjay.syncscope.data.ProfileKind
 import com.qtjay.syncscope.data.ProfileRole
+import com.qtjay.syncscope.data.kindFromPort
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -41,8 +42,9 @@ private fun defaultPort(kind: ProfileKind): String = when (kind) {
 /**
  * 抽屉里内嵌的配置表单：新增或编辑一条客户端配置。
  *
- * 只保留最常用的几项 —— 名称、地址、端口、用户名、密码或 API key；
- * SMB 会多显示一个"共享名"（没有它连不上共享），其余类型不显示。
+ * 只保留最常用的几项 —— 名称、地址、端口、用户名、密码或 API key。
+ * 类型不给按钮选，按端口自动判断（8384→REST、21→FTP、445→SMB），
+ * 判断成 SMB 时才多出一个"共享名"（没有它连不上共享）。
  * 带"测试"按钮：不写入任何东西，只连一下并把结果原样显示出来，方便诊断。
  */
 @Composable
@@ -55,12 +57,15 @@ fun ProfileEditor(
     val scope = rememberCoroutineScope()
     val key = initial?.id
 
-    var kind by remember(key) { mutableStateOf(initial?.kind ?: ProfileKind.REST) }
     var name by remember(key) { mutableStateOf(initial?.name.orEmpty()) }
     var address by remember(key) { mutableStateOf(initial?.host.orEmpty()) }
     var port by remember(key) {
-        mutableStateOf(initial?.port.orEmpty().ifBlank { defaultPort(initial?.kind ?: ProfileKind.REST) })
+        mutableStateOf(
+            initial?.port.orEmpty().ifBlank { defaultPort(initial?.kind ?: ProfileKind.REST) },
+        )
     }
+    // 类型跟着端口走：改端口就换类型，不需要单独的选择按钮
+    val kind = kindFromPort(port, initial?.kind ?: ProfileKind.REST)
     var user by remember(key) { mutableStateOf(initial?.user.orEmpty()) }
     var secret by remember(key) { mutableStateOf(initial?.secret.orEmpty()) }
     var shareName by remember(key) { mutableStateOf(initial?.shareName.orEmpty()) }
@@ -100,20 +105,15 @@ fun ProfileEditor(
             style = MaterialTheme.typography.titleMedium,
         )
 
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            SmallChoice("REST", kind == ProfileKind.REST, Modifier.weight(1f)) {
-                kind = ProfileKind.REST
-                port = defaultPort(ProfileKind.REST)
-            }
-            SmallChoice("FTP", kind == ProfileKind.FTP, Modifier.weight(1f)) {
-                kind = ProfileKind.FTP
-                port = defaultPort(ProfileKind.FTP)
-            }
-            SmallChoice("SMB", kind == ProfileKind.SMB, Modifier.weight(1f)) {
-                kind = ProfileKind.SMB
-                port = defaultPort(ProfileKind.SMB)
-            }
-        }
+        Text(
+            when (kind) {
+                ProfileKind.REST -> "类型：REST（端口 8384）"
+                ProfileKind.FTP -> "类型：FTP（端口 21）"
+                ProfileKind.SMB -> "类型：SMB（端口 445）"
+                ProfileKind.LOCAL -> "类型：本地目录"
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
 
         OutlinedTextField(
             value = name,
@@ -151,6 +151,15 @@ fun ProfileEditor(
             value = secret,
             onValueChange = { secret = it },
             label = { Text("密码或 API key") },
+            supportingText = {
+                Text(
+                    if (user.isBlank()) {
+                        "用户名留空 → 这里填 API key"
+                    } else {
+                        "填了用户名 → 这里填 Syncthing 的 GUI 登录密码"
+                    },
+                )
+            },
             modifier = Modifier.fillMaxWidth(),
             visualTransformation = PasswordVisualTransformation(),
         )
@@ -191,14 +200,5 @@ fun ProfileEditor(
                 },
             )
         }
-    }
-}
-
-@Composable
-private fun SmallChoice(text: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    if (selected) {
-        Button(onClick = onClick, modifier = modifier) { Text(text) }
-    } else {
-        OutlinedButton(onClick = onClick, modifier = modifier) { Text(text) }
     }
 }

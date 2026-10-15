@@ -13,6 +13,18 @@ import java.util.UUID
 enum class ProfileKind { REST, FTP, SMB, LOCAL }
 
 /**
+ * 按端口判断连接类型 —— 省掉表单里那排类型按钮。
+ * 认不出来的端口沿用原来的类型（编辑旧配置时不会误改）。
+ */
+fun kindFromPort(port: String, fallback: ProfileKind = ProfileKind.REST): ProfileKind =
+    when (port.trim().toIntOrNull()) {
+        21, 2121 -> ProfileKind.FTP
+        445, 139 -> ProfileKind.SMB
+        8384 -> ProfileKind.REST
+        else -> fallback
+    }
+
+/**
  * 通道角色。
  *  - INFO：信息面（REST），负责看目录、读写规则、触发重扫
  *  - ACTION：动作面（FTP/SMB/本地），负责真正删除文件
@@ -56,7 +68,11 @@ data class ClientProfile(
             scheme = if (useHttps) "https" else "http",
             host = host,
             port = port.toIntOrNull() ?: 8384,
+            // 填了用户名 → secret 是 GUI 密码，走 Basic 认证 + CSRF；
+            // 没填用户名 → secret 是 API key，只发 X-API-Key。
             apiKey = secret,
+            user = user,
+            password = secret,
         )
 
         ProfileKind.FTP -> FtpChannel(

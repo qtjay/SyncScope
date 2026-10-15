@@ -1,5 +1,6 @@
 package com.qtjay.syncscope.channel
 
+import android.util.Base64
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -15,18 +16,37 @@ import java.net.URLEncoder
 /**
  * 通过 Syncthing REST API 读写配置与忽略规则。
  *
- * <p>前提：目标客户端开启了 Web UI 远程访问，并提供 API key。
- * 这是功能最完整的通道 —— 既能看到远端未下载的文件，也能主动触发重新扫描。
+ * 两种登录方式都支持：
+ *  1. API key —— 只发 X-API-Key 头，服务端直接放行，不需要 CSRF 令牌；
+ *  2. 用户名 + 密码（GUI 登录账号）—— 发 HTTP Basic 认证，
+ *     并且**必须**额外带 CSRF 令牌，否则 Syncthing 2.x 一律回 403 "CSRF Error"。
+ *
+ * CSRF 令牌的取法（在真实客户端 v2.1.6 上验证过）：
+ *  先 GET 一个非 /rest 的路径（这里用 "/"，带同样的认证），
+ *  响应头 X-Syncthing-Id 的第一段就是设备短 ID（如 4YVBFAR），
+ *  响应头 Set-Cookie 里有 CSRF-Token-<短ID>=<令牌>；
+ *  之后每个 /rest 请求都带上头 X-CSRF-Token-<短ID>: <令牌> 即可，
+ *  连 cookie 都不用带（服务端只校验这个头）。
  */
 class RestChannel(
     private val host: String,
     private val port: Int,
-    private val apiKey: String,
+    private val apiKey: String = "",
+    private val user: String = "",
+    private val password: String = "",
     private val scheme: String = "http",
     private val gson: Gson = Gson(),
 ) : SyncChannel {
 
     private val baseUrl = scheme + "://" + host + ":" + port
+
+    /** 设备短 ID，CSRF 头名的一部分。 */
+    @Volatile
+    private var shortId: String? = null
+
+    /** 当前可用的 CSRF 令牌。 */
+    @Volatile
+    private var csrfToken: String? = null
 
     override val capabilities = Capabilities(
         canSeeRemoteOnlyFiles = true,
@@ -37,6 +57,11 @@ class RestChannel(
 
     override fun test(): TestResult {
         return try {
+            // 用用户名密码登录时先握手拿 CSRF 令牌，
+            // 否则第一个请求必然被 403 拒掉（表现为"连不上"）
+            if (csrfToken == null && basicAuth() != null) {
+                handshake()
+            }
             val parsed = gson.fromJson(get("/rest/system/status"), Map::class.java)
             val id = parsed?.get("myID") as? String
             if (id.isNullOrBlank()) {
@@ -60,6 +85,11 @@ class RestChannel(
                 "连接被拒绝：请确认端口 $port 正确，且目标客户端已开启 Web UI 远程访问"
             e is java.net.SocketTimeoutException ->
                 "连接超时：地址不可达，或被防火墙/运营商拦住了"
+            raw.contains("CSRF") ->
+                "服务端要求 CSRF 令牌但没拿到（$raw）：通常是用户名或密码不对"
+            raw.contains("HTTP 403") ->
+                "被拒绝（HTTP 403）：用户名/密码不对，或 API key 无效；" +
+                    "若目标没设 GUI 账号，用户名留空、只填 API key"
             e is javax.net.ssl.SSLHandshakeException ||
                 raw.contains("Trust anchor") ||
                 raw.contains("certificate") ->
@@ -211,12 +241,89 @@ class RestChannel(
         return request("GET", path)
     }
 
-    private fun request(method: String, path: String, body: String? = null): String {
+    /**
+     * 用户名 + 密码 → HTTP Basic 认证头。
+     * 只在填了用户名时才发：没填用户名说明用户给的是 API key，
+     * 发一个密码错的 Basic 头会让服务端触发防爆破延时，白白拖慢连接。
+     */
+    private fun basicAuth(): String? {
+        if (user.isBlank()) {
+            return null
+        }
+        val raw = (user + ":" + password).toByteArray(Charsets.UTF_8)
+        return "Basic " + Base64.encodeToString(raw, Base64.NO_WRAP)
+    }
+
+    private fun applyAuth(conn: HttpURLConnection) {
+        // 两个头都发：服务端先认 API key，认不出来会自动退回到 Basic 认证，
+        // 所以"填了用户名密码"和"填了 API key"两种情况都能覆盖。
+        if (apiKey.isNotBlank()) {
+            conn.setRequestProperty("X-API-Key", apiKey)
+        }
+        basicAuth()?.let { conn.setRequestProperty("Authorization", it) }
+        val token = csrfToken
+        val id = shortId
+        if (token != null && id != null) {
+            conn.setRequestProperty(CSRF_HEADER_PREFIX + id, token)
+        }
+    }
+
+    /**
+     * 取 CSRF 令牌：请求一个非 /rest 的路径，服务端会在 Set-Cookie 里下发令牌。
+     * 拿不到就抛出带原因的异常，让上层显示成人能看懂的提示。
+     */
+    private fun handshake() {
+        val conn = URL(baseUrl + "/").openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "GET"
+            applyAuth(conn)
+            conn.connectTimeout = 15000
+            conn.readTimeout = 30000
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                val text = conn.errorStream?.bufferedReader(Charsets.UTF_8)
+                    ?.use { it.readText() }.orEmpty()
+                throw IllegalStateException("HTTP " + code + ": " + text.take(120))
+            }
+            // X-Syncthing-Id: 4YVBFAR-4X4DQEV-... → 短 ID 是第一段
+            val id = conn.getHeaderField("X-Syncthing-Id").orEmpty().substringBefore("-")
+            val cookies = conn.headerFields[SET_COOKIE] ?: emptyList()
+            var token: String? = null
+            for (cookie in cookies) {
+                val at = cookie.indexOf("CSRF-Token-")
+                if (at < 0) continue
+                token = cookie.substring(cookie.indexOf('=', at) + 1)
+                    .substringBefore(';')
+                    .trim()
+                if (token.isNotBlank()) break
+            }
+            if (id.isBlank() || token.isNullOrBlank()) {
+                throw IllegalStateException(
+                    "HTTP $code：连上了，但拿不到 CSRF 令牌。" +
+                        "请确认用户名与密码是 Syncthing 的 GUI 登录账号",
+                )
+            }
+            shortId = id
+            csrfToken = token
+            Log.d(TAG, "已获取 CSRF 令牌：设备 $id")
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun request(
+        method: String,
+        path: String,
+        body: String? = null,
+        allowRetry: Boolean = true,
+    ): String {
         val url = URL(baseUrl + path)
         val conn = url.openConnection() as HttpURLConnection
-        return try {
+        var code = 0
+        var text = ""
+        try {
             conn.requestMethod = method
-            conn.setRequestProperty("X-API-Key", apiKey)
+            applyAuth(conn)
             conn.connectTimeout = 15000
             conn.readTimeout = 30000
             if (body != null) {
@@ -226,19 +333,26 @@ class RestChannel(
                     it.write(body)
                 }
             }
-            val code = conn.responseCode
+            code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-            if (code !in 200..299) {
-                throw IllegalStateException("HTTP " + code + ": " + text.take(200))
-            }
-            text
+            text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
         } finally {
             conn.disconnect()
         }
+        // 服务端要求 CSRF 令牌：握手拿到令牌后原样重试一次（带 body 的请求也适用）
+        if (code == 403 && text.contains("CSRF Error", ignoreCase = true) && allowRetry) {
+            handshake()
+            return request(method, path, body, allowRetry = false)
+        }
+        if (code !in 200..299) {
+            throw IllegalStateException("HTTP " + code + ": " + text.take(200))
+        }
+        return text
     }
 
     companion object {
         private const val TAG = "RestChannel"
+        private const val CSRF_HEADER_PREFIX = "X-CSRF-Token-"
+        private const val SET_COOKIE = "Set-Cookie"
     }
 }
