@@ -14,6 +14,7 @@ object ProfileStore {
 
     private const val PREFS = "syncscope_profiles"
     private const val KEY = "profiles"
+    private const val KEY_LAST_ACTIVE = "last_active_id"
 
     fun load(context: Context): List<ClientProfile> {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -30,5 +31,22 @@ object ProfileStore {
     fun save(context: Context, profiles: List<ClientProfile>) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         prefs.edit().putString(KEY, Gson().toJson(profiles)).apply()
+    }
+
+    /** 上次连过的客户端 id，用于启动时自动接上。 */
+    fun loadLastActive(context: Context): String? {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_LAST_ACTIVE, null)?.takeIf { it.isNotBlank() }
+    }
+
+    fun saveLastActive(context: Context, id: String?) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val editor = prefs.edit()
+        if (id.isNullOrBlank()) {
+            editor.remove(KEY_LAST_ACTIVE)
+        } else {
+            editor.putString(KEY_LAST_ACTIVE, id)
+        }
+        editor.apply()
     }
 }

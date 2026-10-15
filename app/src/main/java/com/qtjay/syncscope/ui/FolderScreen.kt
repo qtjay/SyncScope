@@ -988,7 +988,7 @@ fun FolderScreen(
                                 .fillMaxWidth()
                                 .padding(vertical = 8.dp),
                         ) {
-                            Text("添加 SMB / FTP / 本地文件通道")
+                            Text("添加 SMB / FTP / WebDAV / 本地文件通道")
                         }
                     } else {
                         Row(

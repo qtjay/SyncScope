@@ -490,6 +490,58 @@ class SmbChannel(
         private const val TAG = "SmbChannel"
         private const val STIGNORE = ".stignore"
 
+        /**
+         * Windows 默认就开着的磁盘管理共享，探测共享名时的候选。
+         * 只探这几个：它们连不上时服务端会立刻回 STATUS_BAD_NETWORK_NAME，
+         * 不必等超时，所以探测很快；而猜普通共享名没有意义，猜不中还得等超时。
+         */
+        val DISK_SHARES: List<String> = listOf("C\$", "D\$", "E\$", "F\$", "G\$", "H\$")
+
+        /**
+         * 探测这台机器上哪些共享名能连上。
+         *
+         * smbj 没有枚举共享的 API（那要走 srvsvc 的 DCE/RPC），
+         * 所以对候选名逐个试着连接，连得上就说明存在且有权限。
+         *
+         * @return 能连上的共享名，按顺序排列
+         */
+        fun probeShares(
+            host: String,
+            port: Int = 445,
+            user: String = "",
+            password: String = "",
+            domain: String = "",
+            candidates: List<String> = DISK_SHARES,
+        ): List<String> {
+            val client = SMBClient()
+            var connection: Connection? = null
+            return try {
+                connection = client.connect(host, port)
+                val session = connection.authenticate(
+                    AuthenticationContext(user, password.toCharArray(), domain),
+                )
+                val found = ArrayList<String>()
+                for (name in candidates) {
+                    val share = try {
+                        session.connectShare(name)
+                    } catch (e: Exception) {
+                        null
+                    }
+                    if (share != null) {
+                        found.add(name)
+                        runCatching { share.close() }
+                    }
+                }
+                found
+            } catch (e: Exception) {
+                Log.w(TAG, "探测共享失败：$host", e)
+                emptyList()
+            } finally {
+                runCatching { connection?.close() }
+                runCatching { client.close() }
+            }
+        }
+
         /** FILE_ATTRIBUTE_DIRECTORY */
         private const val FILE_ATTRIBUTE_DIRECTORY = 0x00000010L
 

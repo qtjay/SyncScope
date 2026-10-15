@@ -36,6 +36,7 @@ private fun defaultPort(kind: ProfileKind): String = when (kind) {
     ProfileKind.REST -> "8384"
     ProfileKind.FTP -> "21"
     ProfileKind.SMB -> "445"
+    ProfileKind.WEBDAV -> "5005"
     ProfileKind.LOCAL -> "8384"
 }
 
@@ -77,6 +78,7 @@ fun ProfileEditor(
             ProfileKind.REST -> address.trim()
             ProfileKind.FTP -> "FTP ${address.trim()}"
             ProfileKind.SMB -> "SMB ${address.trim()}\\${shareName.trim()}"
+            ProfileKind.WEBDAV -> "WebDAV ${address.trim()}"
             ProfileKind.LOCAL -> "本地目录"
         }
         val base = ClientProfile(
@@ -110,6 +112,7 @@ fun ProfileEditor(
                 ProfileKind.REST -> "类型：REST（端口 8384）"
                 ProfileKind.FTP -> "类型：FTP（端口 21）"
                 ProfileKind.SMB -> "类型：SMB（端口 445）"
+                ProfileKind.WEBDAV -> "类型：WebDAV（群晖端口 5005 / 5006）"
                 ProfileKind.LOCAL -> "类型：本地目录"
             },
             style = MaterialTheme.typography.bodySmall,

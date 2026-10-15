@@ -58,7 +58,8 @@ dependencies {
     implementation(libs.core.ktx)
     implementation(libs.gson)
     implementation(libs.documentfile)
-    // 文件通道（动作面）：FTP 与 SMB2/3
+    // 文件通道（动作面）：FTP、SMB2/3、WebDAV
     implementation(libs.commons.net)
     implementation(libs.smbj)
+    implementation(libs.okhttp)
 }

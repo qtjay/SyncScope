@@ -7,10 +7,11 @@ import com.qtjay.syncscope.channel.RestChannel
 import com.qtjay.syncscope.channel.ShareChannel
 import com.qtjay.syncscope.channel.SmbChannel
 import com.qtjay.syncscope.channel.SyncChannel
+import com.qtjay.syncscope.channel.WebdavChannel
 import java.util.UUID
 
 /** 连接类型。 */
-enum class ProfileKind { REST, FTP, SMB, LOCAL }
+enum class ProfileKind { REST, FTP, SMB, WEBDAV, LOCAL }
 
 /**
  * 按端口判断连接类型 —— 省掉表单里那排类型按钮。
@@ -20,6 +21,8 @@ fun kindFromPort(port: String, fallback: ProfileKind = ProfileKind.REST): Profil
     when (port.trim().toIntOrNull()) {
         21, 2121 -> ProfileKind.FTP
         445, 139 -> ProfileKind.SMB
+        // 群晖 WebDAV 的默认端口；80/443 太通用，不能据此判断类型
+        5005, 5006 -> ProfileKind.WEBDAV
         8384 -> ProfileKind.REST
         else -> fallback
     }
@@ -98,6 +101,15 @@ data class ClientProfile(
             port = port.toIntOrNull() ?: 445,
         )
 
+        ProfileKind.WEBDAV -> WebdavChannel(
+            host = host,
+            port = port.toIntOrNull() ?: 80,
+            path = path,
+            user = user,
+            password = secret,
+            useHttps = useHttps,
+        )
+
         ProfileKind.LOCAL -> ShareChannel(context, Uri.parse(treeUri))
     }
 
@@ -106,6 +118,8 @@ data class ClientProfile(
         ProfileKind.REST -> "REST · $host:$port"
         ProfileKind.FTP -> "FTP · $host:$port$path"
         ProfileKind.SMB -> "SMB · $host\\$shareName"
+        ProfileKind.WEBDAV ->
+            "WebDAV · " + (if (useHttps) "https" else "http") + "://$host:$port$path"
         ProfileKind.LOCAL -> "本地目录"
     }
 

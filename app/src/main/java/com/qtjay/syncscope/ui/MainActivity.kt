@@ -79,9 +79,23 @@ fun SyncScopeApp() {
     val scope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
-    var profiles by remember { mutableStateOf(ProfileStore.load(context.applicationContext)) }
-    var activeId by remember { mutableStateOf<String?>(null) }
+    val appCtx = context.applicationContext
+    val initialProfiles = remember(appCtx) { ProfileStore.load(appCtx) }
+    var profiles by remember { mutableStateOf(initialProfiles) }
+    // 启动时自动接上上次那台客户端：省得每次进来都要手动点一次。
+    // 存下来的 id 可能已经过期（配置被删了），所以这里要校验它还在不在。
+    var activeId by remember {
+        mutableStateOf(
+            ProfileStore.loadLastActive(appCtx)?.takeIf { id ->
+                initialProfiles.any { it.id == id && it.role == ProfileRole.INFO }
+            },
+        )
+    }
     var reloadKey by remember { mutableStateOf(0) }
+
+    LaunchedEffect(activeId) {
+        ProfileStore.saveLastActive(appCtx, activeId)
+    }
     /** 文件通道增删改之后 +1，用来重建该文件夹的通道。 */
     var fileChannelKey by remember { mutableStateOf(0) }
 
@@ -181,10 +195,17 @@ fun SyncScopeApp() {
         // 连上之后把"设备名 · 短ID"回写成配置名，省得自己起名字还要记设备是哪台。
         // 只在没自动命名过时写一次，之后用户想怎么改都不再动它。
         if (ch != null && infoProfile != null && !infoProfile.autoNamed) {
-            val id = ch.deviceId()
+            // deviceName() 内部要再发一次 /rest/config 请求，
+            // 必须放 IO 线程 —— 在主线程发网络请求会抛 NetworkOnMainThreadException，
+            // 异常被吞掉后只剩短 ID，表现就是"设备名没出现"。
+            val id = withContext(Dispatchers.IO) {
+                runCatching { ch.deviceId() }.getOrNull()
+            }
             if (!id.isNullOrBlank()) {
                 val short = id.take(7)
-                val device = ch.deviceName()
+                val device = withContext(Dispatchers.IO) {
+                    runCatching { ch.deviceName() }.getOrNull()
+                }
                 val auto = if (device.isNullOrBlank()) short else "$device · $short"
                 persist(
                     profiles.map {
@@ -275,11 +296,35 @@ fun SyncScopeApp() {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
                         .padding(vertical = 12.dp),
                 ) {
-                    // 置顶：添加客户端 / 编辑表单
+                    // 可滚动的主体：编辑表单 + 客户端列表
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
                     if (editorOpen) {
+                        // 表单展开时给一条明确的退路，不能只靠系统返回键
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp),
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    editorOpen = false
+                                    editorInitial = null
+                                },
+                            ) {
+                                Text("← 返回")
+                            }
+                            Text(
+                                if (editorInitial == null) "添加客户端" else "编辑客户端",
+                                style = MaterialTheme.typography.titleSmall,
+                            )
+                        }
                         ProfileEditor(
                             initial = editorInitial,
                             onCancel = {
@@ -308,15 +353,6 @@ fun SyncScopeApp() {
                                 folder = null
                                 reloadKey++
                                 scope.launch { drawerState.close() }
-                            },
-                        )
-                    } else {
-                        NavigationDrawerItem(
-                            label = { Text("＋ 添加客户端") },
-                            selected = false,
-                            onClick = {
-                                editorInitial = null
-                                editorOpen = true
                             },
                         )
                     }
@@ -351,6 +387,19 @@ fun SyncScopeApp() {
                                 Icon(Icons.Default.Edit, contentDescription = "编辑该客户端")
                             }
                         }
+                    }
+                    }
+
+                    // 底部常驻：添加客户端。表单展开时藏起来，免得和"返回"抢位置。
+                    if (!editorOpen) {
+                        NavigationDrawerItem(
+                            label = { Text("＋ 添加客户端") },
+                            selected = false,
+                            onClick = {
+                                editorInitial = null
+                                editorOpen = true
+                            },
+                        )
                     }
                 }
             }
