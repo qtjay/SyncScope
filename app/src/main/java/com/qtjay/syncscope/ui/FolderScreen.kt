@@ -1435,7 +1435,8 @@ private fun TaskProgressBar(
  */
 private sealed class CleanupRow {
     class Header(val kind: ExcessKind) : CleanupRow()
-    class Entry(val item: ExcessItem) : CleanupRow()
+    /** depth 用于展开子项时缩进。 */
+    class Entry(val item: ExcessItem, val depth: Int = 0) : CleanupRow()
 }
 
 /** 每种分类的小标题，让"危险的"和"安全的"一眼分得开。 */
@@ -1482,6 +1483,77 @@ private fun CleanupPane(
     var progressLabel by remember { mutableStateOf<String?>(null) }
     var scanned by remember { mutableStateOf(0) }
     var confirmDelete by remember { mutableStateOf(false) }
+    /** 已展开的目录路径 —— 需要"保留某个子项"时展开它再单独取消。 */
+    var expanded by remember(folder.id) { mutableStateOf(emptySet<String>()) }
+    /** 展开过的目录的子项，按父路径缓存。 */
+    var children by remember(folder.id) { mutableStateOf(emptyMap<String, List<ExcessItem>>()) }
+
+    /**
+     * 勾选/取消一项，并维护父子联动。
+     *
+     * <p>默认目录是整棵勾上的（否则删完会留一地空目录）。
+     * 只有当用户在展开后取消某个子项时，才把父目录从"整棵删"降级成"逐项删"：
+     * 父取消勾选、其余子项补上勾选。这样既保证默认不留空目录，
+     * 又不会把用户想保留的那一支删掉。
+     */
+    fun toggle(path: String, want: Boolean) {
+        if (want) {
+            chosen = chosen + path
+            // 父整棵勾上后，子项不需要再各自勾（删父就够）
+            val kids = children[path]
+            if (kids != null) {
+                chosen = chosen - kids.map { it.path }.toSet()
+            }
+            return
+        }
+        chosen = chosen - path
+        val parent = path.substringBeforeLast('/', "")
+        // 取消子项时，父目录不能再整棵删 —— 降级为逐项删
+        if (parent.isNotBlank() && chosen.contains(parent)) {
+            chosen = chosen - parent
+            val siblings = children[parent]
+            if (siblings != null) {
+                chosen = chosen + siblings.filter { it.path != path }.map { it.path }.toSet()
+            }
+        }
+    }
+
+    /** 展开/收起一个目录，首次展开时加载其子项。 */
+    fun toggleExpand(item: ExcessItem) {
+        if (!item.dir) {
+            return
+        }
+        val path = item.path
+        if (children.containsKey(path)) {
+            expanded = if (expanded.contains(path)) expanded - path else expanded + path
+            return
+        }
+        scope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                val entries = runCatching { fileChannel?.tree(folder.id, path) }
+                    .getOrNull() ?: emptyList()
+                val hits = ArrayList<Pair<String, Pair<Boolean, Long>>>()
+                for (entry in entries) {
+                    val name = entry.name
+                    if (name == null || name.isEmpty() || PROTECTED_NAMES.contains(name)) {
+                        continue
+                    }
+                    val childPath = "$path/$name"
+                    val dir = entry.isDirectory()
+                    hits.add(childPath to (dir to if (dir) -1L else entry.size))
+                }
+                val probed = infoChannel?.let {
+                    runCatching { it.remoteInfoBatch(folder.id, hits.map { it.first }) }.getOrNull()
+                } ?: emptyMap()
+                hits.map { (childPath, meta) ->
+                    classifyExcess(childPath, meta.first, meta.second, probed[childPath],
+                        localDeviceId)
+                }
+            }
+            children = children + (path to loaded)
+            expanded = expanded + path
+        }
+    }
 
     fun scan() {
         val disk = fileChannel
@@ -1506,10 +1578,9 @@ private fun CleanupPane(
                 progressLabel = "已扫 $done 个目录，发现 $hits 项多余文件"
             }
             excess = found
-            // 默认只勾"确认安全"的文件；目录不自动勾 —— 删父目录会带走
-            // 里面可能想保留的子项，这类决定必须让用户自己下。
-            chosen = found.filter { it.kind == ExcessKind.SAFE && !it.dir }
-                .map { it.path }.toSet()
+            // 目录也一起勾：只删文件不删目录会留下一地空目录。
+            // 真要保留某个子项时，展开该目录再单独取消即可。
+            chosen = found.filter { it.kind == ExcessKind.SAFE }.map { it.path }.toSet()
             scanning = false
             progressLabel = null
         }
@@ -1517,24 +1588,35 @@ private fun CleanupPane(
 
     LaunchedEffect(folder.id, fileChannel) { scan() }
 
-    // 分组标题混进数据里：LazyListScope.item() 不能在 items 的 lambda 里调用
-    val rows = remember(excess) {
+    // 分组标题混进数据里：LazyListScope.item() 不能在 items 的 lambda 里调用。
+    // 展开目录时，它的子项也递归地铺进同一张扁平列表。
+    val rows = remember(excess, expanded, children) {
         val out = ArrayList<CleanupRow>()
         var last: ExcessKind? = null
-        for (item in excess) {
-            if (item.kind != last) {
-                out.add(CleanupRow.Header(item.kind))
-                last = item.kind
+        fun walk(items: List<ExcessItem>, depth: Int) {
+            for (item in items) {
+                if (depth == 0 && item.kind != last) {
+                    out.add(CleanupRow.Header(item.kind))
+                    last = item.kind
+                }
+                out.add(CleanupRow.Entry(item, depth))
+                if (item.dir && expanded.contains(item.path)) {
+                    val kids = children[item.path]
+                    if (!kids.isNullOrEmpty()) {
+                        walk(kids, depth + 1)
+                    }
+                }
             }
-            out.add(CleanupRow.Entry(item))
         }
+        walk(excess, 0)
         out
     }
 
     Column(modifier = modifier.padding(horizontal = 16.dp)) {
         Text(
             "按当前目录树状态，下面这些文件本不该出现在目标设备上" +
-                "（已忽略但磁盘上还在）。危险的分在前面，默认都不勾。",
+                "（已忽略但磁盘上还在）。危险的分在前面且不勾，安全的已默认勾上。" +
+                "要保留某个子项，展开它的父目录再单独取消即可。",
             style = MaterialTheme.typography.bodySmall,
         )
 
@@ -1563,8 +1645,12 @@ private fun CleanupPane(
             // 只勾"确认安全"的，把危险的（只有本机一份 / 状态对不上）排除掉
             TextButton(
                 onClick = {
-                    chosen = excess.filter { it.kind == ExcessKind.SAFE && !it.dir }
+                    val safe = excess.filter { it.kind == ExcessKind.SAFE }
                         .map { it.path }.toSet()
+                    // 父整棵勾上时清掉子项的独立勾选，避免同一棵被记两次
+                    chosen = safe.filter { path ->
+                        safe.none { other -> other != path && path.startsWith("$other/") }
+                    }.toSet()
                 },
                 enabled = excess.isNotEmpty() && !deleting,
             ) {
@@ -1611,28 +1697,20 @@ private fun CleanupPane(
                             is CleanupRow.Entry -> {
                                 val entry = row.item
                                 val on = chosen.contains(entry.path)
+                                val open = expanded.contains(entry.path)
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .padding(start = (row.depth * 16).dp)
                                         .clickable(enabled = !deleting) {
-                                            chosen = if (on) {
-                                                chosen - entry.path
-                                            } else {
-                                                chosen + entry.path
-                                            }
+                                            toggle(entry.path, !on)
                                         }
                                         .padding(vertical = 4.dp),
                                 ) {
                                     Checkbox(
                                         checked = on,
-                                        onCheckedChange = { want ->
-                                            chosen = if (want) {
-                                                chosen + entry.path
-                                            } else {
-                                                chosen - entry.path
-                                            }
-                                        },
+                                        onCheckedChange = { want -> toggle(entry.path, want) },
                                         enabled = !deleting,
                                     )
                                     Column(modifier = Modifier.weight(1f)) {
@@ -1652,6 +1730,15 @@ private fun CleanupPane(
                                                     MaterialTheme.colorScheme.onSurfaceVariant
                                             },
                                         )
+                                    }
+                                    // 目录可展开：要保留里面某一支时，展开后单独取消它
+                                    if (entry.dir) {
+                                        TextButton(
+                                            onClick = { toggleExpand(entry) },
+                                            enabled = !deleting,
+                                        ) {
+                                            Text(if (open) "收起" else "展开")
+                                        }
                                     }
                                 }
                             }
