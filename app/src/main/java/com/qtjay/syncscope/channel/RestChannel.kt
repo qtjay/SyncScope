@@ -276,6 +276,8 @@ class RestChannel(
                 size = (global?.get("size") as? Number)?.toLong() ?: -1L,
                 modified = global?.get("modified") as? String ?: "",
                 ignored = global?.get("ignored") as? Boolean ?: false,
+                ignoredLocal = (parsed["local"] as? Map<*, *>)?.get("ignored") as? Boolean
+                    ?: false,
             )
         } catch (e: Exception) {
             if (e.message.orEmpty().contains("HTTP 404")) {

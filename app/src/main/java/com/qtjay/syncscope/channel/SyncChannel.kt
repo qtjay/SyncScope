@@ -44,7 +44,26 @@ data class RemoteInfo(
     val modified: String = "",
     /** 全局模型是否已把它标记为忽略。 */
     val ignored: Boolean = false,
+    /**
+     * 本机这一份是否处于"被忽略"状态（取自 /rest/db/file 的 local.ignored）。
+     *
+     * 这才是"本地被忽略同步"的直接依据 —— 全局模型的 ignored 说的是另一回事。
+     */
+    val ignoredLocal: Boolean = false,
 ) {
+    /**
+     * 本机这一份是否已经与远端同步完成。
+     *
+     * <p>依据：availability 列出的是"持有当前版本的设备"，本机在列就说明
+     * 本机这份与全局版本一致，即已同步。Syncthing 确实提供了这个查询能力
+     * （/rest/db/file 的 local 段 + availability），所以删除前可以核一次。
+     */
+    fun isInSyncWith(localDeviceId: String?): Boolean {
+        if (localDeviceId.isNullOrBlank()) {
+            return false
+        }
+        return availability.contains(localDeviceId)
+    }
     /**
      * 除本机之外是否还有其它设备持有它。
      *

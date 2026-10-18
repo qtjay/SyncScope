@@ -182,7 +182,13 @@ private fun classifyExcess(
     }
     if (!info.hasRemoteCopy(localDeviceId)) {
         return ExcessItem(path, dir, localSize, ExcessKind.ONLY_LOCAL,
-            "除本机外没有其它设备持有，删除将永久丢失")
+            "远端没有这个文件的副本（除本机外无人持有），删除将永久丢失")
+    }
+    // 规则一要求的那一步：确认远端确实已同步过这份（不只"存在记录"）。
+    // Syncthing 的 availability 就是"谁持有当前版本"，据此可判断同步是否完成。
+    if (!info.isInSyncWith(localDeviceId) && !info.ignoredLocal) {
+        return ExcessItem(path, dir, localSize, ExcessKind.RESYNC,
+            "本机这份还没与远端同步完成，先同步再删，否则会丢改动")
     }
     // 有别的设备持有。目录不做大小比对（各通道对目录大小的定义不一致），
     // 只对文件比对，避免"内容变了但大小没变"之外的误判。
@@ -352,9 +358,7 @@ fun FolderScreen(
     var busy by remember { mutableStateOf(false) }
     var view by remember(folder.id, initialView) { mutableStateOf(initialView) }
     var stignoreText by remember { mutableStateOf("") }
-    var confirmPaths by remember { mutableStateOf(emptyList<String>()) }
     /** 确认框里逐条展示"通道会去删哪个路径、现在看不看得见"。 */
-    var confirmDetail by remember { mutableStateOf(emptyList<String>()) }
     /** 文件通道页里"自检"按钮的结果。 */
     var probeText by remember { mutableStateOf<String?>(null) }
     /** 保存/删除/扫描进行到哪一步了。 */
@@ -740,94 +744,6 @@ fun FolderScreen(
         busy = false
     }
 
-    /**
-     * 删除"本次取消勾选"的顶层路径。
-     *
-     * <p>两步走：先批量核对它们在文件通道那台设备上是否真的存在，
-     * 确认存在的才删，查不到的一律拒绝并恢复为同步状态。
-     * 核对用批量接口 —— 逐条查意味着每条路径一次完整握手，那才是慢的根源。
-     */
-    fun runDelete(paths: List<String>) {
-        busy = true
-        progress = TaskProgress("核对远端文件", 0, paths.size)
-        scope.launch {
-            val confirmed = ArrayList<String>()
-            val missing = LinkedHashMap<String, String>()
-            val probed: Map<String, RemoteInfo?> = withContext(Dispatchers.IO) {
-                val ch = fileChannel
-                if (ch == null) {
-                    emptyMap()
-                } else {
-                    runCatching { ch.remoteInfoBatch(folder.id, paths) }
-                        .getOrDefault(emptyMap())
-                }
-            }
-            for (path in paths) {
-                val info = probed[path]
-                when {
-                    info?.exists == true -> confirmed.add(path)
-                    // 通道为空或查询抛错都查不出来，和"确实不在"区分开说，免得误导排查方向
-                    fileChannel == null ->
-                        missing[path] = "没有配置文件通道，无法核对远端是否存在"
-                    info == null ->
-                        missing[path] = "核对失败：通道查询没有返回结果"
-                    else -> missing[path] = "远端不存在（文件通道里看不到这一项）"
-                }
-            }
-            val notes = ArrayList<String>()
-            if (confirmed.isNotEmpty()) {
-                progress = TaskProgress("正在删除 ${confirmed.size} 项…", 0, 0)
-                // 大目录要删几千个文件，逐条刷新界面会把主线程刷死，按 50 条节流
-                var reported = 0
-                val result = withContext(Dispatchers.IO) {
-                    runCatching {
-                        channel.delete(folder, confirmed) { done, total ->
-                            if (done - reported >= 50 || done == total) {
-                                reported = done
-                                progress = TaskProgress("正在删除文件", done, total)
-                            }
-                        }
-                    }.getOrNull()
-                }
-                if (result == null) {
-                    notes.add("调用文件通道删除时抛出异常，一项都没删")
-                } else {
-                    val ok = result.deleted.size
-                    val bad = result.failed.size
-                    notes.add(
-                        "已通过文件通道删除 " + ok + " 项" +
-                            (if (bad > 0) "，失败 " + bad + " 项" else ""),
-                    )
-                    dropRows(result.deleted)
-                    // 失败原因必须显示出来，否则用户只看到"失败"却无从下手
-                    val reasons = result.reasons
-                    if (reasons.isNotEmpty()) {
-                        notes.add(
-                            "失败原因：" + reasons.entries.take(3)
-                                .joinToString("；") { "${it.key} → ${it.value}" },
-                        )
-                    }
-                }
-            }
-            if (missing.isNotEmpty()) {
-                // 远端没有 → 拒绝删除，同时把 .stignore 里这几项改回同步状态
-                for (path in missing.keys) {
-                    markSelected(path)
-                }
-                val rewritten = buildStignoreText()
-                withContext(Dispatchers.IO) {
-                    channel.writeIgnores(folder.id, rewritten.split("\n"))
-            }
-                withContext(Dispatchers.IO) { channel.rescan(folder.id) }
-                notes.add(
-                    missing.size.toString() + " 项未删除、已恢复为同步状态：" +
-                        missing.entries.take(3)
-                            .joinToString("；") { "${it.key} → ${it.value}" },
-                )
-            }
-            finishSave(notes.joinToString("；").ifBlank { "已保存" })
-        }
-    }
 
     /**
      * 暂停下载：立刻写入"忽略一切"的托管块，本机不再下载任何内容。
@@ -912,32 +828,21 @@ fun FolderScreen(
                 busy = false
                 return@launch
             }
+            // 修改 .stignore 本身就会让 Syncthing 重新扫描，这里再显式触发一次
             withContext(Dispatchers.IO) { channel.rescan(folder.id) }
             // 本次取消勾选的：拿打开时读到的规则做差集
             val removed = topLevelPaths(baseline.all() - currentSelection().all())
-            if (removed.isEmpty()) {
-                finishSave("已保存")
-                return@launch
-            }
-            if (!channel.capabilities.canDeleteTargetFiles) {
-                finishSave(
-                    "已写入 .stignore；但未配置文件通道，远端文件未删除（" +
-                        removed.size + " 项）",
-                )
-                return@launch
-            }
-            // 先让通道说出它要去删的真实路径 —— 根配错的话这里一眼就能看出来
-            val probed = withContext(Dispatchers.IO) {
-                runCatching { channel.diagnoseBatch(folder, removed) }
-                    .getOrDefault(emptyMap())
-            }
-            val detail = removed.map { path ->
-                probed[path] ?: "$path\n自检没有返回结果"
-            }
-            confirmDetail = detail
-            confirmPaths = removed
-            progress = null
-            busy = false
+            // 这一页只负责写规则，删除一律交给「校验文件」模块 ——
+            // 那边会先确认远端有没有副本，能挡住"只有本机一份"的误删。
+            finishSave(
+                if (removed.isEmpty()) {
+                    "已保存"
+                } else {
+                    "已保存并写入忽略规则。本次取消勾选 ${removed.size} 项，" +
+                        "等 Syncthing 完成扫描（修改忽略规则文件会触发扫描）后，" +
+                        "记得去「校验文件」删除这些不再同步的文件。"
+                },
+            )
         }
     }
 
@@ -1023,7 +928,7 @@ fun FolderScreen(
                 ViewButton("忽略规则", view == FolderView.RULES, Modifier.weight(1f)) {
                     view = FolderView.RULES
                 }
-                ViewButton("清理多余文件", view == FolderView.CLEANUP, Modifier.weight(1f)) {
+                ViewButton("校验文件", view == FolderView.CLEANUP, Modifier.weight(1f)) {
                     view = FolderView.CLEANUP
                 }
             }
@@ -1297,6 +1202,7 @@ fun FolderScreen(
                     folder = folder,
                     selection = currentSelection(),
                     localDeviceId = localDeviceId,
+                    folderStatus = folderStatus,
                     onRowsGone = { dropRows(it) },
                     onMessage = { message = it },
                     onIncludeInSync = { paths -> includeInSync(paths) },
@@ -1308,53 +1214,6 @@ fun FolderScreen(
         message?.let { Text(it, modifier = Modifier.padding(16.dp)) }
     }
 
-    if (confirmPaths.isNotEmpty()) {
-        AlertDialog(
-            onDismissRequest = { confirmPaths = emptyList() },
-            title = { Text("确认删除远端文件") },
-            text = {
-                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    Text(
-                        "本次取消勾选了 " + confirmPaths.size + " 项，" +
-                            "文件通道会去删下面这些路径：",
-                    )
-                    for (line in confirmDetail) {
-                        Text(
-                            "· " + line,
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(top = 6.dp),
-                        )
-                    }
-                    Text(
-                        "\n删之前会再核一次，查不到的一律不删并恢复为同步状态。",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val paths = confirmPaths
-                        confirmPaths = emptyList()
-                        runDelete(paths)
-                    },
-                ) {
-                    Text("确认删除")
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        confirmPaths = emptyList()
-                        scope.launch { finishSave("已写入 .stignore；未删除远端文件") }
-                    },
-                ) {
-                    Text("只写规则，不删除")
-                }
-            },
-        )
-    }
 }
 
 /**
@@ -1419,7 +1278,7 @@ private fun TaskProgressBar(
 }
 
 /**
- * 「清理多余文件」页。
+ * 「校验文件」页（原「清理多余文件」）。
  *
  * <p>用途：.stignore 里已经忽略掉的东西，目标设备上可能还留着实体文件
  * （比如以前同步过、后来才取消勾选的）。这一页把它们扫出来，允许批量删掉。
@@ -1469,6 +1328,8 @@ private fun CleanupPane(
     folder: Folder,
     selection: SelectionSets,
     localDeviceId: String?,
+    /** 文件夹当前状态 —— 正在扫描时必须拒绝操作，否则索引在变、判定不准。 */
+    folderStatus: FolderStatus? = null,
     onRowsGone: (List<String>) -> Unit,
     onMessage: (String) -> Unit,
     /** 保留下来的文件要不要纳入同步（改 .stignore 放行）。 */
@@ -1555,7 +1416,15 @@ private fun CleanupPane(
         }
     }
 
+    // Syncthing 正在扫描时整个模块都不许动：索引这一刻还在变，
+    // "远端有没有副本"的判定会失真，按它删下去就是赌运气。
+    val folderScanning = folderStatus?.state == "scanning"
+
     fun scan() {
+        if (folderScanning) {
+            onMessage("Syncthing 正在扫描该文件夹，等扫描完成后再校验。")
+            return
+        }
         val disk = fileChannel
         if (disk == null) {
             onMessage("这个文件夹还没配文件通道，扫不了磁盘上的残留。")
@@ -1575,7 +1444,7 @@ private fun CleanupPane(
                 localDeviceId = localDeviceId,
             ) { done, _, hits ->
                 scanned = done
-                progressLabel = "已扫 $done 个目录，发现 $hits 项多余文件"
+                progressLabel = "已扫 $done 个目录，发现 $hits 项待校验"
             }
             excess = found
             // 目录也一起勾：只删文件不删目录会留下一地空目录。
@@ -1613,6 +1482,15 @@ private fun CleanupPane(
     }
 
     Column(modifier = modifier.padding(horizontal = 16.dp)) {
+        if (folderScanning) {
+            Text(
+                "Syncthing 正在扫描该文件夹，此时索引还在变动，" +
+                    "判断结果不可靠 —— 已暂停扫描与删除，请等扫描完成。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(vertical = 8.dp),
+            )
+        }
         Text(
             "按当前目录树状态，下面这些文件本不该出现在目标设备上" +
                 "（已忽略但磁盘上还在）。危险的分在前面且不勾，安全的已默认勾上。" +
@@ -1626,7 +1504,10 @@ private fun CleanupPane(
                 .fillMaxWidth()
                 .padding(top = 8.dp),
         ) {
-            OutlinedButton(onClick = { scan() }, enabled = !scanning && !deleting) {
+            OutlinedButton(
+                onClick = { scan() },
+                enabled = !scanning && !deleting && !folderScanning,
+            ) {
                 Text(if (scanning) "扫描中…" else "重新扫描")
             }
             Spacer(modifier = Modifier.width(8.dp))
@@ -1675,7 +1556,7 @@ private fun CleanupPane(
 
             excess.isEmpty() -> {
                 Text(
-                    "没有多余文件，目标设备上的内容与当前勾选一致。",
+                    "没有需要处理的条目，目标设备上的内容与当前勾选一致。",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(vertical = 12.dp),
                 )
@@ -1735,9 +1616,24 @@ private fun CleanupPane(
                                     if (entry.dir) {
                                         TextButton(
                                             onClick = { toggleExpand(entry) },
-                                            enabled = !deleting,
+                                            enabled = !deleting && !folderScanning,
                                         ) {
                                             Text(if (open) "收起" else "展开")
+                                        }
+                                    }
+                                    // 远端没有副本的：要么删（会丢），要么保留 —— 保留就立刻纳入同步，
+                                    // 否则它永远是个"多余项"，每次扫描都冒出来。
+                                    if (entry.kind == ExcessKind.ONLY_LOCAL) {
+                                        TextButton(
+                                            onClick = {
+                                                onIncludeInSync(listOf(entry.path))
+                                                excess =
+                                                    excess.filter { it.path != entry.path }
+                                                chosen = chosen - entry.path
+                                            },
+                                            enabled = !deleting && !folderScanning,
+                                        ) {
+                                            Text("保留")
                                         }
                                     }
                                 }
@@ -1751,7 +1647,7 @@ private fun CleanupPane(
         if (excess.isNotEmpty()) {
             Button(
                 onClick = { confirmDelete = true },
-                enabled = chosen.isNotEmpty() && !deleting,
+                enabled = chosen.isNotEmpty() && !deleting && !folderScanning,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 8.dp),
@@ -1762,7 +1658,7 @@ private fun CleanupPane(
             // 要么纳入同步——不处理的话它们一直是"多余项"，每次扫描都会冒出来。
             OutlinedButton(
                 onClick = { onIncludeInSync(excess.map { it.path }) },
-                enabled = !deleting,
+                enabled = !deleting && !folderScanning,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 8.dp),
