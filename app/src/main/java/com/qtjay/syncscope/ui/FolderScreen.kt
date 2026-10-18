@@ -391,7 +391,18 @@ private suspend fun scanExcess(
             other.dir && other.path != item.path && item.path.startsWith("${other.path}/")
         }
     }
-    return@withContext topOnly.sortedWith(compareBy({ it.kind.ordinal }, { it.path }))
+
+    // 最后一道保险：用 Syncthing 自己的判定兜底。
+    // isExcess 依据的是内存里的勾选集合，而那个集合是稀疏的（只含目录树里加载过的行），
+    // 目录树没展开过的路径会被错判成"多余"。
+    // local.ignored 是 Syncthing 的权威答案：
+    //   - 在索引里且没被忽略 → 它正在参与同步，绝不能当多余的建议删掉
+    //   - 被忽略 / 不在索引（新增还没扫到）/ 查不到 → 保留，交给上面的分类去判
+    val finalItems = topOnly.filter { item ->
+        val info = probed[item.path]
+        info == null || info.ignoredLocal || !info.exists
+    }
+    return@withContext finalItems.sortedWith(compareBy({ it.kind.ordinal }, { it.path }))
 }
 
 /**
