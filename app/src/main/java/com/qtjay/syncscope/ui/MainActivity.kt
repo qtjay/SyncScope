@@ -48,8 +48,12 @@ import com.qtjay.syncscope.data.ClientProfile
 import com.qtjay.syncscope.data.ProfileRole
 import com.qtjay.syncscope.data.ProfileStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** 文件夹列表里同步状态的刷新间隔。同步过程中进度一直在变，不能只取一次快照。 */
+private const val STATUS_REFRESH_MS = 15_000L
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -272,6 +276,35 @@ fun SyncScopeApp() {
             result == null -> "连接失败"
             result.ok -> result.summary
             else -> result.error
+        }
+    }
+
+    /**
+     * 文件夹列表里的状态是"连接那一刻"的快照，同步过程中它不会自己变。
+     * 这里定期刷一次，否则正在同步时显示的还是连上时的旧状态
+     * （甚至因为某次请求失败而只剩路径），看着像没在同步。
+     */
+    LaunchedEffect(activeId, reloadKey) {
+        while (infoChannel != null) {
+            delay(STATUS_REFRESH_MS)
+            // 已经进到文件夹详情页就别打扰，那边自己会读状态
+            if (folder != null) {
+                continue
+            }
+            val ch = infoChannel ?: break
+            val snapshot = folders.toList()
+            val map = HashMap<String, FolderStatus>()
+            for (item in snapshot) {
+                val st = withContext(Dispatchers.IO) {
+                    runCatching { ch.status(item.id) }.getOrNull()
+                }
+                if (st != null) {
+                    map[item.id] = st
+                }
+            }
+            if (map.isNotEmpty()) {
+                statuses = map
+            }
         }
     }
 

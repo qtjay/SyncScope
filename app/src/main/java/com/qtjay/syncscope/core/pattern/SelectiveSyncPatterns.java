@@ -34,6 +34,9 @@ public final class SelectiveSyncPatterns {
 
     public static final int DEFAULT_MAX_PATTERNS = 1000;
 
+    /** "暂停下载"时写进托管块的唯一规则：忽略一切，本机不下载任何内容。 */
+    public static final String PAUSE_PATTERN = "*";
+
     private SelectiveSyncPatterns() {
     }
 
@@ -148,7 +151,27 @@ public final class SelectiveSyncPatterns {
             blockLines = built.first;
             warnings = built.second;
         }
+        return assemble(existingText, blockLines, warnings, enabled);
+    }
 
+    /**
+     * 暂停下载：托管块里只留一条"忽略一切"，不下载任何东西。
+     *
+     * <p>用途：新加的文件夹还没被扫进全局模型时，browse 是空的，用户无从勾选；
+     * 而等扫出来的这段时间里本机已经在下载了，等能勾选时文件已经下来一大堆，
+     * 选择性同步就失去意义了。先按住不下载，等目录结构出现再勾想要的，
+     * 保存时块会被换成正常的放行规则 —— 那时才开始下载勾选的内容。
+     */
+    public static Result buildPausedStignore(String existingText) {
+        List<String> blockLines = new ArrayList<>();
+        blockLines.add(PAUSE_PATTERN);
+        return assemble(existingText, blockLines, new ArrayList<String>(), true);
+    }
+
+    private static Result assemble(String existingText,
+                                   List<String> blockLines,
+                                   List<String> warnings,
+                                   boolean enabled) {
         List<String> kept = new ArrayList<>();
         boolean skipping = false;
         if (existingText != null && !existingText.isEmpty()) {
@@ -207,11 +230,18 @@ public final class SelectiveSyncPatterns {
         public final List<String> selectedPaths;
         /** 整棵子树都被选中的目录（规则里带 /** 的那些）。 */
         public final Set<String> fullDirs;
+        /**
+         * 处于"暂停下载"状态：托管块存在，但里面没有任何放行规则。
+         * 判定依据就是"有块且放行清单为空" —— 此时本机什么都不下载。
+         */
+        public final boolean paused;
 
-        private Selection(boolean hasBlock, List<String> selectedPaths, Set<String> fullDirs) {
+        private Selection(boolean hasBlock, List<String> selectedPaths,
+                          Set<String> fullDirs, boolean paused) {
             this.hasBlock = hasBlock;
             this.selectedPaths = selectedPaths;
             this.fullDirs = fullDirs;
+            this.paused = paused;
         }
     }
 
@@ -227,7 +257,7 @@ public final class SelectiveSyncPatterns {
         Set<String> full = new LinkedHashSet<>();
         boolean hasBlock = hasManagedBlock(stignoreText);
         if (stignoreText == null) {
-            return new Selection(false, selected, full);
+            return new Selection(false, selected, full, false);
         }
         boolean inside = false;
         for (String raw : stignoreText.split("\n", -1)) {
@@ -255,7 +285,8 @@ public final class SelectiveSyncPatterns {
                 selected.add(path);
             }
         }
-        return new Selection(hasBlock, selected, full);
+        // 有托管块却一条放行都没有 = 暂停下载（块里只有"忽略一切"）
+        return new Selection(hasBlock, selected, full, hasBlock && selected.isEmpty());
     }
 
     /** 去掉托管块，只保留用户自己的规则（关闭选择性同步时用）。 */

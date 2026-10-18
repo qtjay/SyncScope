@@ -58,6 +58,7 @@ import com.qtjay.syncscope.data.TreeSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -110,6 +111,12 @@ private val PROTECTED_NAMES = setOf(".stignore", ".stfolder", ".stversions")
 
 /** 列目录时的并发上限：再高容易把 SMB 服务端或手机网络栈压垮。 */
 private const val SCAN_PARALLELISM = 6
+
+/** 目录树还空着时的重试间隔：目标端首次扫描通常要几十秒到几分钟。 */
+private const val SCAN_RETRY_MS = 10_000L
+
+/** 重试多久就停下（10 分钟）。再扫不出来基本不是扫描慢，而是配置有问题。 */
+private const val SCAN_WAIT_MS = 600_000L
 
 /**
  * 扫描"按当前目录树状态应当忽略、却仍留在目标设备上的文件"。
@@ -261,6 +268,13 @@ fun FolderScreen(
     var probeText by remember { mutableStateOf<String?>(null) }
     /** 保存/删除/扫描进行到哪一步了。 */
     var progress by remember { mutableStateOf<TaskProgress?>(null) }
+    /**
+     * 处于"暂停下载"：托管块里只有"忽略一切"，本机什么都不下载。
+     * 用于新加的文件夹还没扫出目录结构时先按住，避免文件先下来一大堆。
+     */
+    var paused by remember { mutableStateOf(false) }
+    /** 暂停下载是否正在写入。 */
+    var pausing by remember { mutableStateOf(false) }
 
     fun currentSelection(): SelectionSets = SelectionSets(
         fullDirs = fullDirs.keys.toSet(),
@@ -372,6 +386,7 @@ fun FolderScreen(
         fullDirs.clear()
         partialDirs.clear()
         selectedFiles.clear()
+        paused = parsed.paused
         if (!parsed.hasBlock) {
             for (row in rows) {
                 if (row.dir) fullDirs[row.path] = true else selectedFiles[row.path] = true
@@ -718,6 +733,39 @@ fun FolderScreen(
         }
     }
 
+    /**
+     * 暂停下载：立刻写入"忽略一切"的托管块，本机不再下载任何内容。
+     *
+     * <p>场景：新加的文件夹还没被扫进全局模型时，browse 是空的、无从勾选，
+     * 而等扫出来这段时间本机已经在下载，等能勾时文件已经下来一大堆。
+     *
+     * <p>暂停后等目录结构出现（界面会自动重试），用户勾选想要的 → 保存 →
+     * 托管块被换成正常的放行规则，那时才开始下载勾选的内容。
+     */
+    fun pauseDownload() {
+        pausing = true
+        scope.launch {
+            val written = withContext(Dispatchers.IO) {
+                runCatching {
+                    channel.writeIgnores(
+                        folder.id,
+                        SelectiveSyncPatterns.buildPausedStignore(stignoreText).text.split("\n"),
+                    )
+                }.getOrDefault(false)
+            }
+            if (!written) {
+                message = "写入忽略规则失败，未能暂停下载。"
+                pausing = false
+                return@launch
+            }
+            withContext(Dispatchers.IO) { channel.rescan(folder.id) }
+            refreshRulesOnly()
+            message = "已暂停下载，本机不会下载任何内容。" +
+                "等目录结构出现后勾选要同步的内容，保存即开始下载。"
+            pausing = false
+        }
+    }
+
     fun save() {
         if (rows.isEmpty()) {
             message = "目录树还没有内容，先点刷新取一次再保存"
@@ -772,6 +820,20 @@ fun FolderScreen(
         baseline = currentSelection()
         persist()
         loading = false
+
+        // 目录结构还空着就定时重试：新加的文件夹要等目标端扫完才有内容，
+        // 让用户一遍遍手动点刷新不现实。首次扫描几十秒到几分钟都正常。
+        var waited = 0L
+        while (rows.isEmpty() && waited < SCAN_WAIT_MS) {
+            delay(SCAN_RETRY_MS)
+            waited += SCAN_RETRY_MS
+            if (rows.isEmpty()) {
+                loading = true
+                refreshFromRemote()
+                baseline = currentSelection()
+                loading = false
+            }
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -917,10 +979,40 @@ fun FolderScreen(
                         }
 
                         rows.isEmpty() -> {
-                            Text(
-                                "没有条目。请确认该文件夹已完成首次扫描。",
-                                modifier = Modifier.padding(16.dp),
-                            )
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                            ) {
+                                if (paused) {
+                                    Text("已暂停下载，本机不会下载任何内容。")
+                                    Text(
+                                        "等目标端扫描完成，这里会自动出现目录结构；" +
+                                            "届时勾选要同步的内容，保存即开始下载。",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                } else {
+                                    Text("还没有目录结构，目标端可能还在首次扫描。")
+                                    Text(
+                                        "可以先暂停下载，免得文件先下来一大堆；" +
+                                            "等目录结构出现后再勾选要同步的内容。",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                    Button(
+                                        onClick = { pauseDownload() },
+                                        enabled = !pausing && !busy,
+                                        modifier = Modifier.padding(top = 8.dp),
+                                    ) {
+                                        Text(if (pausing) "正在暂停…" else "暂停下载")
+                                    }
+                                }
+                                TextButton(
+                                    onClick = { scope.launch { refreshFromRemote() } },
+                                    enabled = !loading && !busy,
+                                ) {
+                                    Text("立即重试")
+                                }
+                            }
                         }
 
                         else -> {
