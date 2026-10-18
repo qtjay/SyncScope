@@ -112,6 +112,13 @@ fun SyncScopeApp() {
     var folder by remember { mutableStateOf<Folder?>(null) }
     var folderView by remember { mutableStateOf(FolderView.TREE) }
     var status by remember { mutableStateOf<String?>(null) }
+    /** 正在连某个客户端（还没拿到文件夹列表）—— 期间不能显示"没有读到文件夹"。 */
+    var connecting by remember { mutableStateOf(false) }
+    /**
+     * 上一次连过的客户端 id，用来判断这次是不是"换了客户端"。
+     * 换了才清空列表：刷新同一台时保留旧列表更平滑，不会闪一下空白。
+     */
+    var lastConnectedId by remember { mutableStateOf<String?>(null) }
     // 抽屉内的添加/编辑表单（只编辑客户端配置）
     var editorOpen by remember { mutableStateOf(false) }
     var editorInitial by remember { mutableStateOf<ClientProfile?>(null) }
@@ -194,9 +201,23 @@ fun SyncScopeApp() {
             statuses = emptyMap()
             folder = null
             status = null
+            connecting = false
+            lastConnectedId = null
             return@LaunchedEffect
         }
         status = "正在连接…"
+        connecting = true
+        // 换了另一台客户端：立刻把上一台的文件夹清掉。
+        // 不清的话，连接这几秒里主界面还显示着旧客户端的内容，看着像"残留"。
+        if (lastConnectedId != null && lastConnectedId != activeId) {
+            folders = emptyList()
+            statuses = emptyMap()
+            folder = null
+            // 合成通道也是上一台客户端 + 上一个文件夹拼出来的，一并作废
+            folderChannel = null
+            fileChannel = null
+        }
+        lastConnectedId = activeId
         val ch = withContext(Dispatchers.IO) {
             runCatching { infoProfile.build(context.applicationContext) }.getOrNull()
         }
@@ -245,6 +266,7 @@ fun SyncScopeApp() {
                 )
             }
         }
+        connecting = false
         status = when {
             ch == null -> "配置无效，请重新添加"
             result == null -> "连接失败"
@@ -510,6 +532,7 @@ fun SyncScopeApp() {
                             folders = folders,
                             statuses = statuses,
                             configured = configuredFolderIds(),
+                            loading = connecting,
                             onOpen = {
                                 folderView = FolderView.TREE
                                 folder = it

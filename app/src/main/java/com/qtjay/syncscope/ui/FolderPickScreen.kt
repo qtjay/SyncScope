@@ -42,6 +42,12 @@ fun FolderPickScreen(
      * 而且按钮留着容易误触；要改的话进文件夹详情页的「文件通道」页。
      */
     configured: Set<String> = emptySet(),
+    /**
+     * 正在连客户端、还没拿到文件夹列表。
+     * 必须和"空列表"区分开：连接中显示进度，空列表才是"没读到"，
+     * 否则切换客户端的那几秒会先闪一句"没有读到共享文件夹"，像是失败了。
+     */
+    loading: Boolean = false,
     onOpen: (Folder) -> Unit,
     onEdit: (Folder) -> Unit,
     onReload: () -> Unit,
@@ -53,7 +59,14 @@ fun FolderPickScreen(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         )
 
-        if (folders.isEmpty()) {
+        if (loading) {
+            // 顶部状态栏已经写了"正在连接…"，这里只补一句读取进度，不重复
+            Text(
+                "正在读取文件夹…",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        } else if (folders.isEmpty()) {
             Text(
                 "没有读到共享文件夹。请确认目标客户端在运行、地址与密钥正确。",
                 modifier = Modifier.padding(horizontal = 16.dp),
