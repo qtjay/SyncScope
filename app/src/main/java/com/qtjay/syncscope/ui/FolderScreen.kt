@@ -238,6 +238,12 @@ private suspend fun scanExcess(
                             synchronized(hits) {
                                 hits.add(Hit(path, dir, if (dir) -1L else entry.size))
                             }
+                            // 命中目录也要继续下钻：只有确认整棵都安全，才能整棵删。
+                            // 不下钻就只能拿目录自身的记录判定，里面混着没同步过的
+                            // 新文件时会被一起删掉。
+                            if (dir) {
+                                synchronized(next) { next.add(path) }
+                            }
                         } else if (dir) {
                             synchronized(next) { next.add(path) }
                         }
@@ -255,9 +261,36 @@ private suspend fun scanExcess(
         runCatching { it.remoteInfoBatch(folderId, hits.map { it.path }) }.getOrNull()
     } ?: emptyMap()
 
-    return@withContext hits
+    val classified = hits
         .map { classifyExcess(it.path, it.dir, it.size, probed[it.path], localDeviceId) }
-        .sortedWith(compareBy({ it.kind.ordinal }, { it.path }))
+
+    // 目录的分类要由它的子树决定：子树里只要有一项不安全，父目录就不能整棵删，
+    // 得展开让用户逐项决定。这是"目录默认勾"能安全成立的前提。
+    val riskyByParent = HashMap<String, Int>()
+    for (item in classified) {
+        if (item.kind == ExcessKind.SAFE || item.kind == ExcessKind.RESYNC) continue
+        var slash = item.path.indexOf('/')
+        while (slash > 0) {
+            val parent = item.path.substring(0, slash)
+            riskyByParent[parent] = (riskyByParent[parent] ?: 0) + 1
+            slash = item.path.indexOf('/', slash + 1)
+        }
+    }
+
+    return@withContext classified.map { item ->
+        if (!item.dir) {
+            return@map item
+        }
+        val risky = riskyByParent[item.path] ?: 0
+        if (risky == 0) {
+            item.copy(kind = ExcessKind.SAFE, note = "子树已全部校验通过，可整棵删除")
+        } else {
+            item.copy(
+                kind = ExcessKind.UNKNOWN,
+                note = "子树里有 $risky 项不安全，已展开请逐项确认",
+            )
+        }
+    }.sortedWith(compareBy({ it.kind.ordinal }, { it.path }))
 }
 
 /**
@@ -404,14 +437,54 @@ fun FolderScreen(
         return all.any { it.startsWith(prefix) }
     }
 
+    /** 已加载的直接子项（只下一层，不含更深的）。 */
+    fun directChildren(path: String): List<TreeRow> {
+        val prefix = if (path.isEmpty()) "" else "$path/"
+        val out = ArrayList<TreeRow>()
+        for (row in rows) {
+            if (!row.path.startsWith(prefix)) {
+                continue
+            }
+            val rest = row.path.substring(prefix.length)
+            // 只看直接子项：剩下的部分里不能再有分隔符
+            if (rest.isEmpty() || rest.contains("/")) {
+                continue
+            }
+            out.add(row)
+        }
+        return out
+    }
+
+    /**
+     * 某一行的三态：ON 全选、OFF 未选、PARTIAL 半选。
+     *
+     * <p>目录的状态要由它**已加载的子项**算出来，不能只看"自己在不在某个桶里"：
+     * <ul>
+     *   <li>父目录整棵放行后取消一个子项，父目录仍在 partialDirs ——
+     *       只看桶会一直显示全勾，实际应该是半选；</li>
+     *   <li>父目录没勾但子项被逐个勾满时，只看桶会一直是半选，实际应该是全勾。</li>
+     * </ul>
+     */
     fun stateOf(row: TreeRow): TriState {
-        if (isSelected(row.path) || hasSelectedAncestor(row.path)) {
+        if (hasSelectedAncestor(row.path)) {
             return TriState.ON
         }
-        return if (row.dir && hasSelectedDescendant(row.path)) {
-            TriState.PARTIAL
-        } else {
-            TriState.OFF
+        if (!row.dir) {
+            return if (selectedFiles.containsKey(row.path)) TriState.ON else TriState.OFF
+        }
+        if (fullDirs.containsKey(row.path)) {
+            return TriState.ON
+        }
+        val kids = directChildren(row.path)
+        // 没展开过就没有子项可算，退回按桶判断
+        if (kids.isEmpty()) {
+            return if (partialDirs.containsKey(row.path)) TriState.PARTIAL else TriState.OFF
+        }
+        val on = kids.count { stateOf(it) == TriState.ON }
+        return when {
+            on == 0 -> TriState.OFF
+            on == kids.size -> TriState.ON
+            else -> TriState.PARTIAL
         }
     }
 
@@ -448,10 +521,37 @@ fun FolderScreen(
         }
     }
 
+    /**
+     * 取某一层的内容。
+     *
+     * <p>默认只走 REST 的全局模型，那就只看得到"远端有的"。
+     * 配了文件通道时再叠一层真实磁盘 —— 磁盘上新出现、还没进索引的东西
+     * 也要显示在树上（默认未勾选），否则用户根本不知道它存在。
+     */
     suspend fun fetchChildren(prefix: String): List<TreeRow> {
-        val entries = withContext(Dispatchers.IO) {
+        val remote = withContext(Dispatchers.IO) {
             runCatching { channel.tree(folder.id, prefix) }.getOrDefault(emptyList())
         }
+        val local = fileChannel?.let { ch ->
+            withContext(Dispatchers.IO) {
+                runCatching { ch.tree(folder.id, prefix) }.getOrDefault(emptyList())
+            }
+        } ?: emptyList()
+        // 远端为准，磁盘上独有的补在后面
+        val merged = LinkedHashMap<String, BrowseEntry>()
+        for (entry in remote) {
+            val name = entry.name
+            if (!name.isNullOrEmpty()) {
+                merged[name] = entry
+            }
+        }
+        for (entry in local) {
+            val name = entry.name
+            if (!name.isNullOrEmpty() && !merged.containsKey(name)) {
+                merged[name] = entry
+            }
+        }
+        val entries = merged.values
         val depth = if (prefix.isEmpty()) 0 else prefix.split("/").size
         return entries
             .filter { !it.name.isNullOrEmpty() }
@@ -1203,6 +1303,7 @@ fun FolderScreen(
                     selection = currentSelection(),
                     localDeviceId = localDeviceId,
                     folderStatus = folderStatus,
+                    stignoreText = stignoreText,
                     onRowsGone = { dropRows(it) },
                     onMessage = { message = it },
                     onIncludeInSync = { paths -> includeInSync(paths) },
@@ -1330,6 +1431,8 @@ private fun CleanupPane(
     localDeviceId: String?,
     /** 文件夹当前状态 —— 正在扫描时必须拒绝操作，否则索引在变、判定不准。 */
     folderStatus: FolderStatus? = null,
+    /** 当前的 .stignore 全文：没有托管块就意味着全部同步，不该有任何多余文件。 */
+    stignoreText: String = "",
     onRowsGone: (List<String>) -> Unit,
     onMessage: (String) -> Unit,
     /** 保留下来的文件要不要纳入同步（改 .stignore 放行）。 */
@@ -1421,6 +1524,15 @@ private fun CleanupPane(
     val folderScanning = folderStatus?.state == "scanning"
 
     fun scan() {
+        // 没有托管块 = 全部同步，磁盘上根本不存在"多余文件"。
+        // 少了这一句，勾选集合里没有的路径（比如目录树没展开过的）会全被当成多余。
+        if (!SelectiveSyncPatterns.hasManagedBlock(stignoreText)) {
+            excess = emptyList()
+            chosen = emptySet()
+            scanning = false
+            progressLabel = null
+            return
+        }
         if (folderScanning) {
             onMessage("Syncthing 正在扫描该文件夹，等扫描完成后再校验。")
             return
