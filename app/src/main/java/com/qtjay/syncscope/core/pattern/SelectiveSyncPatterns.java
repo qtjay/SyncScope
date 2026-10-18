@@ -113,6 +113,8 @@ public final class SelectiveSyncPatterns {
         }
 
         walk("", children, dirSet, lines, seen, warnings);
+        // 兜底自检：万一哪一层祖先没补上，这里把它补齐
+        auditAncestors(lines, seen, warnings);
 
         if (lines.size() > maxPatterns) {
             warnings.add("规则条数 " + lines.size() + " 超过上限 " + maxPatterns + "，建议改为勾选上层目录");
@@ -374,6 +376,57 @@ public final class SelectiveSyncPatterns {
             }
         }
         emit(lines, seen, directory.isEmpty() ? "/**" : "/" + escaped(directory, warnings) + "/**");
+    }
+
+    /**
+     * 自检：被放行的每一项的祖先链必须完整。
+     *
+     * <p>Syncthing 的规则是"父目录被忽略后，子项无法放行"。少补任何一级祖先，
+     * 表现就是"子目录明明勾了却同步不了" —— 规则自相矛盾，而且很难从界面上看出来。
+     * walk() 本来就会逐层补，这里再兜一次，防止以后改动时漏掉。
+     */
+    private static void auditAncestors(List<String> lines, Set<String> seen,
+                                       List<String> warnings) {
+        Set<String> allowed = new LinkedHashSet<>();
+        for (String line : lines) {
+            if (!line.startsWith("!")) {
+                continue;
+            }
+            String path = toPath(line.substring(1));
+            if (!path.isEmpty()) {
+                allowed.add(path);
+            }
+        }
+        List<String> missing = new ArrayList<>();
+        for (String path : allowed) {
+            String[] comps = path.split("/");
+            StringBuilder current = new StringBuilder();
+            for (int i = 0; i < comps.length - 1; i++) {
+                if (current.length() > 0) {
+                    current.append('/');
+                }
+                current.append(comps[i]);
+                String ancestor = current.toString();
+                if (!allowed.contains(ancestor) && !missing.contains(ancestor)) {
+                    missing.add(ancestor);
+                }
+            }
+        }
+        if (missing.isEmpty()) {
+            return;
+        }
+        // 放行规则必须排在忽略规则之前（首个匹配生效），所以补在最前面
+        List<String> patched = new ArrayList<>();
+        for (String path : missing) {
+            if (seen.add("!/" + path)) {
+                patched.add("!/" + path);
+            }
+        }
+        if (!patched.isEmpty()) {
+            lines.addAll(0, patched);
+            warnings.add(
+                "已补齐 " + patched.size() + " 条父目录放行规则（缺了它们子项同步不了）");
+        }
     }
 
     private static void emit(List<String> lines, Set<String> seen, String line) {
