@@ -129,6 +129,49 @@ private const val SCAN_WAIT_MS = 600_000L
 private const val SCAN_MAX_DEPTH = 4
 
 /**
+ * 某一层内容的"指纹"：条目数 + 文件总大小（目录自身不算大小）。
+ *
+ * 两边指纹相同就认为这一层没有差异。碰撞的可能极小（数量与总字节同时对上），
+ * 换来的是不必再往下钻 —— 这是整个扫描最主要的性能来源。
+ */
+private fun layerSignature(entries: List<BrowseEntry>): String {
+    var count = 0
+    var total = 0L
+    for (entry in entries) {
+        val name = entry.name
+        if (name == null || name.isEmpty() || name == "." || name == "..") {
+            continue
+        }
+        if (PROTECTED_NAMES.contains(name)) {
+            continue
+        }
+        count++
+        if (!entry.isDirectory()) {
+            total += entry.size
+        }
+    }
+    return "$count/$total"
+}
+
+/**
+ * 这一层的本地内容与远端（全局模型）内容是否可能不同。
+ *
+ * 拿不到远端信息时返回 true —— 保守地继续下钻，宁可慢也不能漏判。
+ */
+private suspend fun subtreeMayDiffer(
+    folderId: String,
+    prefix: String,
+    diskEntries: List<BrowseEntry>,
+    infoChannel: SyncChannel?,
+): Boolean {
+    val info = infoChannel ?: return true
+    val remote = withContext(Dispatchers.IO) {
+        runCatching { info.tree(folderId, prefix) }.getOrNull()
+    } ?: return true
+    return layerSignature(diskEntries) != layerSignature(remote)
+}
+
+/**
  * 扫描"按当前目录树状态应当忽略、却仍留在目标设备上的文件"。
  *
  * <p>判定完全走三桶勾选状态（fullDirs / partialDirs / files），与生成 .stignore
@@ -239,6 +282,15 @@ private suspend fun scanExcess(
                 async {
                     val entries = runCatching { diskChannel.tree(folderId, prefix) }
                         .getOrDefault(emptyList())
+                    // 剪枝：本地与远端这一层的"条目数 + 总大小"一致，
+                    // 说明子树没有差异，不必再往下钻。大文件夹里绝大多数目录
+                    // 都是一致的，这是把扫描时间压下来的关键。
+                    val dive = depth >= SCAN_MAX_DEPTH || subtreeMayDiffer(
+                        folderId = folderId,
+                        prefix = prefix,
+                        diskEntries = entries,
+                        infoChannel = infoChannel,
+                    )
                     for (entry in entries) {
                         val name = entry.name ?: continue
                         if (name.isEmpty() || name == "." || name == "..") continue
@@ -249,11 +301,10 @@ private suspend fun scanExcess(
                             synchronized(hits) {
                                 hits.add(Hit(path, dir, if (dir) -1L else entry.size, depth))
                             }
-                            // 命中目录也要继续下钻：只有确认整棵都安全，才能整棵删
-                            if (dir && depth < SCAN_MAX_DEPTH) {
+                            if (dir && dive && depth < SCAN_MAX_DEPTH) {
                                 synchronized(next) { next.add(path to depth + 1) }
                             }
-                        } else if (dir) {
+                        } else if (dir && dive) {
                             synchronized(next) { next.add(path to depth + 1) }
                         }
                     }
@@ -327,14 +378,14 @@ private suspend fun scanExcess(
         }
     }
 
-    // 整棵安全的父目录只显示它自己：里面几十上百条再逐条列出来既啰嗦，
-    // 用户还得一条条确认才敢下手。
-    val safeDirs = decided.filter { it.dir && it.kind == ExcessKind.SAFE }
-        .map { it.path }.toSet()
-    val collapsed = decided.filter { item ->
-        safeDirs.none { dir -> item.path.startsWith("$dir/") }
+    // 只保留顶层：父目录已经列出来了，里面几十上百条再逐条铺开，列表会长到没法看，
+    // 用户还得一条条确认才敢下手。要看细节就点「展开」，那时才去加载这一层。
+    val topOnly = decided.filter { item ->
+        decided.none { other ->
+            other.dir && other.path != item.path && item.path.startsWith("${other.path}/")
+        }
     }
-    return@withContext collapsed.sortedWith(compareBy({ it.kind.ordinal }, { it.path }))
+    return@withContext topOnly.sortedWith(compareBy({ it.kind.ordinal }, { it.path }))
 }
 
 /**
@@ -1554,8 +1605,18 @@ private fun CleanupPane(
                     runCatching { it.remoteInfoBatch(folder.id, hits.map { it.first }) }.getOrNull()
                 } ?: emptyMap()
                 hits.map { (childPath, meta) ->
-                    classifyExcess(childPath, meta.first, meta.second, probed[childPath],
-                        localDeviceId)
+                    val item = classifyExcess(childPath, meta.first, meta.second,
+                        probed[childPath], localDeviceId)
+                    // 展开出来的子目录还没往下钻过，不能当成"已确认安全"，
+                    // 标记出来让用户自己看一眼再决定
+                    if (meta.first) {
+                        item.copy(
+                            kind = ExcessKind.UNKNOWN,
+                            note = "展开得到的目录，未继续深入校验，确认后再删",
+                        )
+                    } else {
+                        item
+                    }
                 }
             }
             children = children + (path to loaded)
