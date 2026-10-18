@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
@@ -381,6 +382,28 @@ fun SyncScopeApp() {
                         .fillMaxSize()
                         .padding(vertical = 12.dp),
                 ) {
+                    // 顶部固定：标题 + 右侧返回。放在滚动区之外，滚到哪儿都在。
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                    ) {
+                        Text(
+                            "配置",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IconButton(
+                            onClick = { scope.launch { drawerState.close() } },
+                        ) {
+                            Icon(
+                                Icons.Default.ArrowBack,
+                                contentDescription = "返回主界面",
+                            )
+                        }
+                    }
+
                     // 可滚动的主体：编辑表单 + 客户端列表
                     Column(
                         modifier = Modifier
@@ -449,34 +472,38 @@ fun SyncScopeApp() {
                         )
                     }
 
-                    clientProfiles.forEach { profile ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            NavigationDrawerItem(
-                                modifier = Modifier.weight(1f),
-                                label = {
-                                    Column {
-                                        Text(profile.name)
-                                        Text(
-                                            profile.subtitle(),
-                                            style = MaterialTheme.typography.bodySmall,
-                                        )
-                                    }
-                                },
-                                selected = profile.id == activeId,
-                                onClick = {
-                                    activeId = profile.id
-                                    folder = null
-                                    scope.launch { drawerState.close() }
-                                },
-                            )
-                            // 右侧编辑按钮
-                            IconButton(
-                                onClick = {
-                                    editorInitial = profile
-                                    editorOpen = true
-                                },
-                            ) {
-                                Icon(Icons.Default.Edit, contentDescription = "编辑该客户端")
+                    // 编辑/添加表单展开时，下面的客户端列表整段藏掉：
+                    // 表单和列表同屏会出现两个"可点区域"，既晃眼也容易点错。
+                    if (!editorOpen) {
+                        clientProfiles.forEach { profile ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                NavigationDrawerItem(
+                                    modifier = Modifier.weight(1f),
+                                    label = {
+                                        Column {
+                                            Text(profile.name)
+                                            Text(
+                                                profile.subtitle(),
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
+                                        }
+                                    },
+                                    selected = profile.id == activeId,
+                                    onClick = {
+                                        activeId = profile.id
+                                        folder = null
+                                        scope.launch { drawerState.close() }
+                                    },
+                                )
+                                // 右侧编辑按钮
+                                IconButton(
+                                    onClick = {
+                                        editorInitial = profile
+                                        editorOpen = true
+                                    },
+                                ) {
+                                    Icon(Icons.Default.Edit, contentDescription = "编辑该客户端")
+                                }
                             }
                         }
                     }
