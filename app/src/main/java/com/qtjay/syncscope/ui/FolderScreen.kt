@@ -137,6 +137,7 @@ private const val SCAN_MAX_DEPTH = 4
 private fun layerSignature(entries: List<BrowseEntry>): String {
     var count = 0
     var total = 0L
+    val names = ArrayList<String>()
     for (entry in entries) {
         val name = entry.name
         if (name == null || name.isEmpty() || name == "." || name == "..") {
@@ -146,11 +147,16 @@ private fun layerSignature(entries: List<BrowseEntry>): String {
             continue
         }
         count++
+        names.add(name)
         if (!entry.isDirectory()) {
             total += entry.size
         }
     }
-    return "$count/$total"
+    // 光靠"条目数 + 总大小"理论上会碰撞（数量与字节都对上、但文件其实不同）。
+    // 名字本来就在返回的条目里，顺手加进去排序后取哈希 —— 不额外花一次请求，
+    // 却把碰撞概率压到可以忽略。
+    names.sort()
+    return "$count/$total/" + names.hashCode()
 }
 
 /**
