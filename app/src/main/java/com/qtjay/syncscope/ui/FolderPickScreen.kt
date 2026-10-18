@@ -35,6 +35,13 @@ fun FolderPickScreen(
     channel: SyncChannel,
     folders: List<Folder>,
     statuses: Map<String, FolderStatus>,
+    /**
+     * 已经配过文件通道的文件夹 id。
+     *
+     * 这些不再显示右侧的"配置"按钮 —— 配好了就不用再配，
+     * 而且按钮留着容易误触；要改的话进文件夹详情页的「文件通道」页。
+     */
+    configured: Set<String> = emptySet(),
     onOpen: (Folder) -> Unit,
     onEdit: (Folder) -> Unit,
     onReload: () -> Unit,
@@ -87,9 +94,12 @@ fun FolderPickScreen(
                             Text(folder.path, style = MaterialTheme.typography.bodySmall)
                         }
                     }
-                    // 右侧编辑：进入该文件夹的文件通道 / 选择性同步 / .stignore 配置
-                    IconButton(onClick = { onEdit(folder) }) {
-                        Icon(Icons.Default.Edit, contentDescription = "配置该文件夹")
+                    // 右侧编辑：进入该文件夹的文件通道 / 选择性同步 / .stignore 配置。
+                    // 已配过文件通道的就不再显示 —— 配好了不必再配，留着还容易误触。
+                    if (folder.id !in configured) {
+                        IconButton(onClick = { onEdit(folder) }) {
+                            Icon(Icons.Default.Edit, contentDescription = "配置该文件夹")
+                        }
                     }
                 }
             }

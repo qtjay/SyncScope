@@ -68,11 +68,20 @@ fun ConnectionScreen(
     title: String = "SyncScope",
     /** 传入已有配置即进入编辑模式：字段预填，保存时沿用原 id。 */
     initial: ClientProfile? = null,
+    /**
+     * 上次为别的文件夹填过的同类配置，新建时拿来预填。
+     *
+     * 只提供连接信息（地址、端口、账号、共享名、域、HTTPS），
+     * 不填路径 —— 每个文件夹的路径本来就不同，填了反而是误导。
+     */
+    template: ClientProfile? = null,
     onCancel: (() -> Unit)? = null,
     onConnected: (SyncChannel, ClientProfile) -> Unit,
 ) {
     val context = LocalContext.current
-    val startMode = when (initial?.kind) {
+    // 预填来源：编辑时用它自己，新建时用模板
+    val source: ClientProfile? = initial ?: template
+    val startMode = when (source?.kind) {
         ProfileKind.FTP -> Mode.FTP
         ProfileKind.SMB -> Mode.SMB
         ProfileKind.WEBDAV -> Mode.WEBDAV
@@ -80,8 +89,8 @@ fun ConnectionScreen(
         // 默认落在 SMB：Windows 共享最常见
         else -> Mode.SMB
     }
-    val defaultPort = remember(startMode, initial) {
-        initial?.port.orEmpty().ifBlank {
+    val defaultPort = remember(startMode, source) {
+        source?.port.orEmpty().ifBlank {
             when (startMode) {
                 Mode.FTP -> "21"
                 Mode.SMB -> "445"
@@ -93,16 +102,18 @@ fun ConnectionScreen(
     val key = initial?.id
     // key 变化（换了一个配置来编辑）时重新预填，而不是沿用上一次的输入
     var mode by remember(key) { mutableStateOf(startMode) }
+    // 名称不套用模板：模板的名字属于另一个文件夹，照搬只会混淆
     var name by remember(key) { mutableStateOf(initial?.name.orEmpty()) }
-    var address by remember(key) { mutableStateOf(initial?.host.orEmpty()) }
+    var address by remember(key) { mutableStateOf(source?.host.orEmpty()) }
     var port by remember(key) { mutableStateOf(defaultPort) }
-    val startSecret = initial?.secret.orEmpty()
+    val startSecret = source?.secret.orEmpty()
     var password by remember(key) { mutableStateOf(startSecret) }
-    var user by remember(key) { mutableStateOf(initial?.user.orEmpty()) }
-    var shareName by remember(key) { mutableStateOf(initial?.shareName.orEmpty()) }
-    var domain by remember(key) { mutableStateOf(initial?.domain.orEmpty()) }
+    var user by remember(key) { mutableStateOf(source?.user.orEmpty()) }
+    var shareName by remember(key) { mutableStateOf(source?.shareName.orEmpty()) }
+    var domain by remember(key) { mutableStateOf(source?.domain.orEmpty()) }
+    // 路径不套用模板：每个文件夹的目录不同
     var remotePath by remember(key) { mutableStateOf(initial?.path.orEmpty()) }
-    var useHttps by remember(key) { mutableStateOf(initial?.useHttps ?: false) }
+    var useHttps by remember(key) { mutableStateOf(source?.useHttps ?: false) }
     var shareUri by remember(key) {
         mutableStateOf<Uri?>(
             initial?.treeUri?.takeIf { it.isNotBlank() }?.let { Uri.parse(it) },
@@ -211,6 +222,16 @@ fun ConnectionScreen(
                 label = { Text("名称（可选，便于区分多个设备）") },
                 modifier = Modifier.fillMaxWidth(),
             )
+
+            // 新建且拿到了模板时说一声，免得用户以为是自己填的内容
+            if (initial == null && source != null && source.kind != ProfileKind.LOCAL) {
+                val label = source.name.ifBlank { source.subtitle() }
+                Text(
+                    "已按上次「$label」填过的连接信息预填，只需改下面的路径。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
 
             when (mode) {
                 Mode.FTP -> {

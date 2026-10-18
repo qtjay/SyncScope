@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -53,6 +54,11 @@ fun ProfileEditor(
     initial: ClientProfile?,
     onCancel: () -> Unit,
     onSaved: (ClientProfile) -> Unit,
+    /**
+     * 删除当前配置。传 null（或 initial 为空、即新建状态）时不显示删除按钮 ——
+     * 还没有保存过的东西谈不上删除。
+     */
+    onDelete: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -72,6 +78,8 @@ fun ProfileEditor(
     var shareName by remember(key) { mutableStateOf(initial?.shareName.orEmpty()) }
     var testing by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<TestResult?>(null) }
+    // key 变化（换成编辑另一个配置）时重置，避免上一次的确认框残留
+    var confirmDelete by remember(key) { mutableStateOf(false) }
 
     fun build(): ClientProfile {
         val autoName = when (kind) {
@@ -189,6 +197,45 @@ fun ProfileEditor(
             }
             Button(onClick = { onSaved(build()) }) { Text("保存") }
             TextButton(onClick = onCancel) { Text("取消") }
+        }
+
+        // 删除单独放一行：四个按钮挤一起容易点错，而删除是不可逆的。
+        // 只有编辑已有配置时才出现 —— 没保存过的东西谈不上删除。
+        if (onDelete != null && initial != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = { confirmDelete = true }) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+
+        if (confirmDelete) {
+            val label = initial?.name?.ifBlank { initial.subtitle() }.orEmpty()
+            AlertDialog(
+                onDismissRequest = { confirmDelete = false },
+                title = { Text("删除客户端") },
+                text = {
+                    Text(
+                        "将删除「$label」以及它下面的所有文件通道配置，无法恢复。",
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            confirmDelete = false
+                            onDelete?.invoke()
+                        },
+                    ) {
+                        Text("删除", color = MaterialTheme.colorScheme.error)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmDelete = false }) { Text("取消") }
+                },
+            )
         }
 
         val shown = result

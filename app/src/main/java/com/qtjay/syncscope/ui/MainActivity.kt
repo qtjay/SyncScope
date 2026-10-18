@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
@@ -156,6 +155,32 @@ fun SyncScopeApp() {
         fileChannelKey++
     }
 
+    /**
+     * 新建文件通道时的预填模板：取最近一份同类配置（排除正在编辑的那份）。
+     *
+     * 同一台设备上给多个文件夹配通道时，地址、端口、账号、共享名基本是同一套，
+     * 只有路径不同 —— 每次都重敲一遍既费事又容易敲错。
+     */
+    fun fileChannelTemplate(): ClientProfile? {
+        val linked = activeId.orEmpty()
+        val editing = editingProfile?.id
+        return profiles.lastOrNull {
+            it.role == ProfileRole.ACTION &&
+                (it.linkedTo.isBlank() || it.linkedTo == linked) &&
+                it.id != editing
+        }
+    }
+
+    /** 已经配过文件通道的文件夹 id —— 主界面上这些不再显示"配置"按钮。 */
+    fun configuredFolderIds(): Set<String> {
+        val linked = activeId.orEmpty()
+        return profiles.filter {
+            it.role == ProfileRole.ACTION &&
+                (it.linkedTo.isBlank() || it.linkedTo == linked) &&
+                it.folderId.isNotBlank()
+        }.map { it.folderId }.toSet()
+    }
+
     // 切换客户端 / 点刷新：连上之后立刻取同步文件夹与其状态
     LaunchedEffect(activeId, reloadKey) {
         val infoProfile = profiles.firstOrNull {
@@ -252,6 +277,7 @@ fun SyncScopeApp() {
         ConnectionScreen(
             title = if (initial != null) "编辑文件通道：${initial.name}" else "给文件夹配文件通道",
             initial = initial,
+            template = if (initial != null) null else fileChannelTemplate(),
             onCancel = {
                 editing = false
                 editingProfile = null
@@ -356,6 +382,15 @@ fun SyncScopeApp() {
                                 reloadKey++
                                 scope.launch { drawerState.close() }
                             },
+                            onDelete = {
+                                val initial = editorInitial
+                                if (initial != null) {
+                                    deleteProfile(initial.id)
+                                }
+                                editorOpen = false
+                                editorInitial = null
+                                scope.launch { drawerState.close() }
+                            },
                         )
                     }
 
@@ -430,12 +465,8 @@ fun SyncScopeApp() {
                         IconButton(onClick = { reloadKey++ }) {
                             Icon(Icons.Default.Refresh, contentDescription = "重新连接并获取")
                         }
-                        val removable = activeId
-                        if (removable != null) {
-                            IconButton(onClick = { deleteProfile(removable) }) {
-                                Icon(Icons.Default.Delete, contentDescription = "删除当前客户端")
-                            }
-                        }
+                        // 删除客户端的入口放在「编辑客户端」表单底部，
+                        // 这里不再放垃圾桶图标 —— 误触一次就是整台客户端没了。
                     },
                 )
             },
@@ -478,6 +509,7 @@ fun SyncScopeApp() {
                             channel = info,
                             folders = folders,
                             statuses = statuses,
+                            configured = configuredFolderIds(),
                             onOpen = {
                                 folderView = FolderView.TREE
                                 folder = it
