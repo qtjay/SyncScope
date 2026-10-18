@@ -1426,7 +1426,6 @@ private fun TaskProgressBar(
  * <p>走文件通道而不是 REST：REST 只能看全局模型，删不掉；
  * 而且这一页关心的正是"磁盘上到底还剩什么"，只有文件通道看得到。
  */
-@Composable
 /** 每种分类的小标题，让"危险的"和"安全的"一眼分得开。 */
 @Composable
 private fun ExcessGroupHeader(kind: ExcessKind) {
@@ -1449,6 +1448,7 @@ private fun ExcessGroupHeader(kind: ExcessKind) {
     )
 }
 
+@Composable
 private fun CleanupPane(
     fileChannel: SyncChannel?,
     /** 信息面（REST）：用来判断"别的设备有没有副本、状态是否一致"。 */
