@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -1426,6 +1427,17 @@ private fun TaskProgressBar(
  * <p>走文件通道而不是 REST：REST 只能看全局模型，删不掉；
  * 而且这一页关心的正是"磁盘上到底还剩什么"，只有文件通道看得到。
  */
+/**
+ * 「校验文件」列表的一行：要么是分组标题，要么是一个待处理的条目。
+ *
+ * 之所以做成扁平列表，是因为 LazyListScope 的 item() 不能在 itemsIndexed 的
+ * lambda 里调用（DSL_SCOPE_VIOLATION）—— 分组标题必须先混进数据里。
+ */
+private sealed class CleanupRow {
+    class Header(val kind: ExcessKind) : CleanupRow()
+    class Entry(val item: ExcessItem) : CleanupRow()
+}
+
 /** 每种分类的小标题，让"危险的"和"安全的"一眼分得开。 */
 @Composable
 private fun ExcessGroupHeader(kind: ExcessKind) {
@@ -1505,6 +1517,20 @@ private fun CleanupPane(
 
     LaunchedEffect(folder.id, fileChannel) { scan() }
 
+    // 分组标题混进数据里：LazyListScope.item() 不能在 items 的 lambda 里调用
+    val rows = remember(excess) {
+        val out = ArrayList<CleanupRow>()
+        var last: ExcessKind? = null
+        for (item in excess) {
+            if (item.kind != last) {
+                out.add(CleanupRow.Header(item.kind))
+                last = item.kind
+            }
+            out.add(CleanupRow.Entry(item))
+        }
+        out
+    }
+
     Column(modifier = modifier.padding(horizontal = 16.dp)) {
         Text(
             "按当前目录树状态，下面这些文件本不该出现在目标设备上" +
@@ -1571,49 +1597,62 @@ private fun CleanupPane(
 
             else -> {
                 LazyColumn(modifier = Modifier.weight(1f)) {
-                    // 参数名不能叫 item —— 会遮蔽 LazyListScope.item() 函数，编译不过
-                    itemsIndexed(excess) { index, entry ->
-                        val on = chosen.contains(entry.path)
-                        // 换分组时插一行小标题，让"危险"和"安全"一眼分得开
-                        if (index == 0 || excess[index - 1].kind != entry.kind) {
-                            item(key = "hdr_" + entry.kind) { ExcessGroupHeader(entry.kind) }
-                        }
-                        item(key = entry.path) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable(enabled = !deleting) {
-                                        chosen =
-                                            if (on) chosen - entry.path else chosen + entry.path
-                                    }
-                                    .padding(vertical = 4.dp),
-                            ) {
-                                Checkbox(
-                                    checked = on,
-                                    onCheckedChange = { want ->
-                                        chosen =
-                                            if (want) chosen + entry.path else chosen - entry.path
-                                    },
-                                    enabled = !deleting,
-                                )
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        entry.path + if (entry.dir) "/" else "",
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                    Text(
-                                        entry.note,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = when (entry.kind) {
-                                            ExcessKind.ONLY_LOCAL, ExcessKind.UNKNOWN ->
-                                                MaterialTheme.colorScheme.error
-                                            ExcessKind.RESYNC ->
-                                                MaterialTheme.colorScheme.tertiary
-                                            ExcessKind.SAFE ->
-                                                MaterialTheme.colorScheme.onSurfaceVariant
+                    items(
+                        rows,
+                        key = { row ->
+                            when (row) {
+                                is CleanupRow.Header -> "hdr_" + row.kind
+                                is CleanupRow.Entry -> row.item.path
+                            }
+                        },
+                    ) { row ->
+                        when (row) {
+                            is CleanupRow.Header -> ExcessGroupHeader(row.kind)
+                            is CleanupRow.Entry -> {
+                                val entry = row.item
+                                val on = chosen.contains(entry.path)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable(enabled = !deleting) {
+                                            chosen = if (on) {
+                                                chosen - entry.path
+                                            } else {
+                                                chosen + entry.path
+                                            }
+                                        }
+                                        .padding(vertical = 4.dp),
+                                ) {
+                                    Checkbox(
+                                        checked = on,
+                                        onCheckedChange = { want ->
+                                            chosen = if (want) {
+                                                chosen + entry.path
+                                            } else {
+                                                chosen - entry.path
+                                            }
                                         },
+                                        enabled = !deleting,
                                     )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            entry.path + if (entry.dir) "/" else "",
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                        Text(
+                                            entry.note,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = when (entry.kind) {
+                                                ExcessKind.ONLY_LOCAL, ExcessKind.UNKNOWN ->
+                                                    MaterialTheme.colorScheme.error
+                                                ExcessKind.RESYNC ->
+                                                    MaterialTheme.colorScheme.tertiary
+                                                ExcessKind.SAFE ->
+                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
