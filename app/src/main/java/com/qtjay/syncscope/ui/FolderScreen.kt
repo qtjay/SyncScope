@@ -120,6 +120,15 @@ private const val SCAN_RETRY_MS = 10_000L
 private const val SCAN_WAIT_MS = 600_000L
 
 /**
+ * 校验文件时最多往下钻几层。
+ *
+ * 下钻是为了确认"整棵是否都安全"，但每层都要列一次目录，深度越大请求越多。
+ * 超过这个深度就不再自动判定，留给用户点展开时才继续 —— 真正需要整棵删的大目录
+ * 通常也就在浅层，深层目录让用户自己看更稳妥。
+ */
+private const val SCAN_MAX_DEPTH = 4
+
+/**
  * 扫描"按当前目录树状态应当忽略、却仍留在目标设备上的文件"。
  *
  * <p>判定完全走三桶勾选状态（fullDirs / partialDirs / files），与生成 .stignore
@@ -216,15 +225,17 @@ private suspend fun scanExcess(
     localDeviceId: String?,
     onProgress: (scanned: Int, pending: Int, found: Int) -> Unit,
 ): List<ExcessItem> = withContext(Dispatchers.IO) {
-    data class Hit(val path: String, val dir: Boolean, val size: Long)
+    data class Hit(val path: String, val dir: Boolean, val size: Long, val depth: Int)
 
     val hits = ArrayList<Hit>()
-    var level: List<String> = listOf("")
+    // 下钻是为了确认"整棵是否都安全"，但不能无限深 —— 深层目录按层深截断，
+    // 超出部分标记为待展开，由用户点开时才继续判定，避免大目录把扫描拖死。
+    var level: List<Pair<String, Int>> = listOf("" to 0)
     var scanned = 0
     while (level.isNotEmpty()) {
-        val next = ArrayList<String>()
+        val next = ArrayList<Pair<String, Int>>()
         for (chunk in level.chunked(SCAN_PARALLELISM)) {
-            chunk.map { prefix ->
+            chunk.map { (prefix, depth) ->
                 async {
                     val entries = runCatching { diskChannel.tree(folderId, prefix) }
                         .getOrDefault(emptyList())
@@ -236,16 +247,14 @@ private suspend fun scanExcess(
                         val dir = entry.isDirectory()
                         if (isExcess(path, dir, selection)) {
                             synchronized(hits) {
-                                hits.add(Hit(path, dir, if (dir) -1L else entry.size))
+                                hits.add(Hit(path, dir, if (dir) -1L else entry.size, depth))
                             }
-                            // 命中目录也要继续下钻：只有确认整棵都安全，才能整棵删。
-                            // 不下钻就只能拿目录自身的记录判定，里面混着没同步过的
-                            // 新文件时会被一起删掉。
-                            if (dir) {
-                                synchronized(next) { next.add(path) }
+                            // 命中目录也要继续下钻：只有确认整棵都安全，才能整棵删
+                            if (dir && depth < SCAN_MAX_DEPTH) {
+                                synchronized(next) { next.add(path to depth + 1) }
                             }
                         } else if (dir) {
-                            synchronized(next) { next.add(path) }
+                            synchronized(next) { next.add(path to depth + 1) }
                         }
                     }
                 }
@@ -264,33 +273,68 @@ private suspend fun scanExcess(
     val classified = hits
         .map { classifyExcess(it.path, it.dir, it.size, probed[it.path], localDeviceId) }
 
-    // 目录的分类要由它的子树决定：子树里只要有一项不安全，父目录就不能整棵删，
-    // 得展开让用户逐项决定。这是"目录默认勾"能安全成立的前提。
+    // 到了深度上限就没继续下钻的目录：子树没看全，不能当成已确认
+    val truncated = HashSet<String>()
+    for (hit in hits) {
+        if (hit.dir && hit.depth >= SCAN_MAX_DEPTH) {
+            truncated.add(hit.path)
+        }
+    }
+
+    // 统计每个目录下"不安全"的后代数量（只跳过 SAFE，RESYNC/ONLY_LOCAL 都算风险：
+    // 状态对不上或远端没有，都不能整棵删）
     val riskyByParent = HashMap<String, Int>()
+    val riskyKinds = HashMap<String, MutableSet<ExcessKind>>()
     for (item in classified) {
-        if (item.kind == ExcessKind.SAFE || item.kind == ExcessKind.RESYNC) continue
+        if (item.kind == ExcessKind.SAFE) {
+            continue
+        }
         var slash = item.path.indexOf('/')
         while (slash > 0) {
             val parent = item.path.substring(0, slash)
             riskyByParent[parent] = (riskyByParent[parent] ?: 0) + 1
+            riskyKinds.getOrPut(parent) { LinkedHashSet() }.add(item.kind)
             slash = item.path.indexOf('/', slash + 1)
         }
     }
 
-    return@withContext classified.map { item ->
+    val decided = classified.map { item ->
         if (!item.dir) {
             return@map item
+        }
+        if (item.path in truncated) {
+            return@map item.copy(
+                kind = ExcessKind.UNKNOWN,
+                note = "层级较深，未自动深入校验，展开后再确认",
+            )
         }
         val risky = riskyByParent[item.path] ?: 0
         if (risky == 0) {
             item.copy(kind = ExcessKind.SAFE, note = "子树已全部校验通过，可整棵删除")
         } else {
+            // 说清不安全在哪儿：远端没副本 / 状态对不上 / 查不到，
+            // 不然用户只知道"不安全"，却不知道该看哪一项
+            val kinds = riskyKinds[item.path] ?: emptySet()
+            val why = when {
+                ExcessKind.ONLY_LOCAL in kinds -> "含远端没有副本的项，删了就没了"
+                ExcessKind.RESYNC in kinds -> "含与远端状态不一致的项，可能丢改动"
+                else -> "含查不到远端状态的项"
+            }
             item.copy(
                 kind = ExcessKind.UNKNOWN,
-                note = "子树里有 $risky 项不安全，已展开请逐项确认",
+                note = "子树里 $risky 项不安全（$why），展开后逐项确认",
             )
         }
-    }.sortedWith(compareBy({ it.kind.ordinal }, { it.path }))
+    }
+
+    // 整棵安全的父目录只显示它自己：里面几十上百条再逐条列出来既啰嗦，
+    // 用户还得一条条确认才敢下手。
+    val safeDirs = decided.filter { it.dir && it.kind == ExcessKind.SAFE }
+        .map { it.path }.toSet()
+    val collapsed = decided.filter { item ->
+        safeDirs.none { dir -> item.path.startsWith("$dir/") }
+    }
+    return@withContext collapsed.sortedWith(compareBy({ it.kind.ordinal }, { it.path }))
 }
 
 /**
