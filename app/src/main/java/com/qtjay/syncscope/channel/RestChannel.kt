@@ -273,6 +273,9 @@ class RestChannel(
                 exists = !deleted,
                 directory = type == BrowseEntry.TYPE_DIRECTORY,
                 availability = availability,
+                size = (global?.get("size") as? Number)?.toLong() ?: -1L,
+                modified = global?.get("modified") as? String ?: "",
+                ignored = global?.get("ignored") as? Boolean ?: false,
             )
         } catch (e: Exception) {
             if (e.message.orEmpty().contains("HTTP 404")) {

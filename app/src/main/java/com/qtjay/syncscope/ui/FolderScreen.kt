@@ -125,13 +125,93 @@ private const val SCAN_WAIT_MS = 600_000L
  * 的是同一份数据，所以不会出现"规则说忽略、界面说同步"的口径打架。
  * 命中整棵子树的目录不再往下钻 —— 整棵都是多余的，直接整棵删。
  */
+/**
+ * 多余项的判定分类，决定默认勾不勾、以及要提示用户什么。
+ *
+ * 顺序即展示顺序：ONLY_LOCAL 最危险，必须排在最前面先提醒用户。
+ */
+enum class ExcessKind {
+    /** 只有本机这一份，删了就永久丢失 —— 必须由用户显式确认。 */
+    ONLY_LOCAL,
+
+    /** 其他设备有副本，但两边状态对不上 —— 该重新同步，而不是直接删。 */
+    RESYNC,
+
+    /** 其他设备有相同的副本 —— 删掉本机这一份不会丢数据。 */
+    SAFE,
+
+    /** 查不到足够信息，无法判断 —— 一律不自动删。 */
+    UNKNOWN,
+}
+
+/** 一个"按当前勾选本不该存在"的条目，连同它的判定结果。 */
+data class ExcessItem(
+    val path: String,
+    val dir: Boolean,
+    /** 文件通道看到的大小；目录为 -1。 */
+    val size: Long,
+    val kind: ExcessKind,
+    val note: String,
+)
+
+/**
+ * 给一个多余项分类。
+ *
+ * <p>判定顺序很关键：
+ * <ol>
+ *   <li>查不到 / 不在全局模型 → 只有本机有，绝不能自动删；</li>
+ *   <li>扣掉本机后没人持有 → 同样只有本机有；</li>
+ *   <li>有人持有 → 再比对状态，对不上就提示重新同步而不是删。</li>
+ * </ol>
+ */
+private fun classifyExcess(
+    path: String,
+    dir: Boolean,
+    localSize: Long,
+    info: RemoteInfo?,
+    localDeviceId: String?,
+): ExcessItem {
+    if (info == null) {
+        return ExcessItem(path, dir, localSize, ExcessKind.UNKNOWN,
+            "查不到远端状态，不能自动删")
+    }
+    if (!info.exists) {
+        return ExcessItem(path, dir, localSize, ExcessKind.ONLY_LOCAL,
+            "全局模型里没有它，只有本机这一份")
+    }
+    if (!info.hasRemoteCopy(localDeviceId)) {
+        return ExcessItem(path, dir, localSize, ExcessKind.ONLY_LOCAL,
+            "除本机外没有其它设备持有，删除将永久丢失")
+    }
+    // 有别的设备持有。目录不做大小比对（各通道对目录大小的定义不一致），
+    // 只对文件比对，避免"内容变了但大小没变"之外的误判。
+    if (dir || localSize < 0L) {
+        return ExcessItem(path, dir, localSize, ExcessKind.SAFE,
+            "其它设备持有该副本")
+    }
+    return when (info.matchesLocal(localSize)) {
+        true -> ExcessItem(path, dir, localSize, ExcessKind.SAFE,
+            "其它设备有相同副本")
+        false -> ExcessItem(path, dir, localSize, ExcessKind.RESYNC,
+            "其它设备副本大小不同（本机 $localSize，远端 ${info.size}），可能已改动未同步")
+        null -> ExcessItem(path, dir, localSize, ExcessKind.UNKNOWN,
+            "拿不到大小信息，无法比对状态")
+    }
+}
+
 private suspend fun scanExcess(
-    channel: SyncChannel,
+    /** 文件通道：扫目标设备上的真实磁盘。 */
+    diskChannel: SyncChannel,
+    /** 信息面（REST）：查全局模型，判断"别的设备有没有、状态是否一致"。 */
+    infoChannel: SyncChannel?,
     folderId: String,
     selection: SelectionSets,
+    localDeviceId: String?,
     onProgress: (scanned: Int, pending: Int, found: Int) -> Unit,
-): List<String> = withContext(Dispatchers.IO) {
-    val found = ArrayList<String>()
+): List<ExcessItem> = withContext(Dispatchers.IO) {
+    data class Hit(val path: String, val dir: Boolean, val size: Long)
+
+    val hits = ArrayList<Hit>()
     var level: List<String> = listOf("")
     var scanned = 0
     while (level.isNotEmpty()) {
@@ -139,7 +219,7 @@ private suspend fun scanExcess(
         for (chunk in level.chunked(SCAN_PARALLELISM)) {
             chunk.map { prefix ->
                 async {
-                    val entries = runCatching { channel.tree(folderId, prefix) }
+                    val entries = runCatching { diskChannel.tree(folderId, prefix) }
                         .getOrDefault(emptyList())
                     for (entry in entries) {
                         val name = entry.name ?: continue
@@ -148,7 +228,9 @@ private suspend fun scanExcess(
                         val path = if (prefix.isEmpty()) name else "$prefix/$name"
                         val dir = entry.isDirectory()
                         if (isExcess(path, dir, selection)) {
-                            synchronized(found) { found.add(path) }
+                            synchronized(hits) {
+                                hits.add(Hit(path, dir, if (dir) -1L else entry.size))
+                            }
                         } else if (dir) {
                             synchronized(next) { next.add(path) }
                         }
@@ -157,10 +239,18 @@ private suspend fun scanExcess(
             }.awaitAll()
         }
         scanned += level.size
-        onProgress(scanned, next.size, found.size)
+        onProgress(scanned, next.size, hits.size)
         level = next
     }
-    found.sorted()
+
+    // 批量查全局模型：逐条查意味着每条一次完整握手，那才是慢的根源
+    val probed = infoChannel?.let {
+        runCatching { it.remoteInfoBatch(folderId, hits.map { it.path }) }.getOrNull()
+    } ?: emptyMap()
+
+    return@withContext hits
+        .map { classifyExcess(it.path, it.dir, it.size, probed[it.path], localDeviceId) }
+        .sortedWith(compareBy({ it.kind.ordinal }, { it.path }))
 }
 
 /**
@@ -275,6 +365,11 @@ fun FolderScreen(
     var paused by remember { mutableStateOf(false) }
     /** 暂停下载是否正在写入。 */
     var pausing by remember { mutableStateOf(false) }
+    /**
+     * 本机（目标设备）的 Syncthing 设备 ID。
+     * 判断"别的设备有没有副本"时必须把它排除 —— 要删的正是本机这一份。
+     */
+    var localDeviceId by remember { mutableStateOf<String?>(null) }
 
     fun currentSelection(): SelectionSets = SelectionSets(
         fullDirs = fullDirs.keys.toSet(),
@@ -742,6 +837,38 @@ fun FolderScreen(
      * <p>暂停后等目录结构出现（界面会自动重试），用户勾选想要的 → 保存 →
      * 托管块被换成正常的放行规则，那时才开始下载勾选的内容。
      */
+    /**
+     * 把保留下来的文件纳入同步 —— 改 .stignore 放行它们。
+     *
+     * 不做这一步的话，这些文件既留在磁盘上又不参与同步，
+     * 下次扫描还会被当成多余项，反复提示。
+     */
+    fun includeInSync(paths: List<String>) {
+        if (paths.isEmpty()) {
+            return
+        }
+        busy = true
+        scope.launch {
+            for (path in paths) {
+                markSelected(path)
+            }
+            val written = withContext(Dispatchers.IO) {
+                runCatching {
+                    channel.writeIgnores(folder.id, buildStignoreText().split("\n"))
+                }.getOrDefault(false)
+            }
+            if (!written) {
+                message = "纳入同步失败：忽略规则没写成"
+                busy = false
+                return@launch
+            }
+            withContext(Dispatchers.IO) { channel.rescan(folder.id) }
+            refreshRulesOnly()
+            message = "已把 ${paths.size} 项纳入同步"
+            busy = false
+        }
+    }
+
     fun pauseDownload() {
         pausing = true
         scope.launch {
@@ -815,6 +942,10 @@ fun FolderScreen(
 
     LaunchedEffect(folder.id) {
         loading = true
+        // 本机 ID 只是 REST 面缓存下来的字段，取一次就好
+        localDeviceId = withContext(Dispatchers.IO) {
+            runCatching { channel.deviceId() }.getOrNull()
+        }
         loadCached()
         refreshFromRemote()
         baseline = currentSelection()
@@ -1161,10 +1292,13 @@ fun FolderScreen(
             FolderView.CLEANUP -> {
                 CleanupPane(
                     fileChannel = fileChannel,
+                    infoChannel = channel,
                     folder = folder,
                     selection = currentSelection(),
+                    localDeviceId = localDeviceId,
                     onRowsGone = { dropRows(it) },
                     onMessage = { message = it },
+                    onIncludeInSync = { paths -> includeInSync(paths) },
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -1293,16 +1427,43 @@ private fun TaskProgressBar(
  * 而且这一页关心的正是"磁盘上到底还剩什么"，只有文件通道看得到。
  */
 @Composable
+/** 每种分类的小标题，让"危险的"和"安全的"一眼分得开。 */
+@Composable
+private fun ExcessGroupHeader(kind: ExcessKind) {
+    val title = when (kind) {
+        ExcessKind.ONLY_LOCAL -> "⚠ 只有本机这一份 —— 默认不勾，删了就永久丢失"
+        ExcessKind.RESYNC -> "⟳ 其它设备有副本但状态对不上 —— 建议重新同步，别直接删"
+        ExcessKind.SAFE -> "✓ 其它设备有相同副本 —— 可安全删除"
+        ExcessKind.UNKNOWN -> "? 无法判断 —— 默认不勾"
+    }
+    val color = when (kind) {
+        ExcessKind.ONLY_LOCAL, ExcessKind.UNKNOWN -> MaterialTheme.colorScheme.error
+        ExcessKind.RESYNC -> MaterialTheme.colorScheme.tertiary
+        ExcessKind.SAFE -> MaterialTheme.colorScheme.primary
+    }
+    Text(
+        title,
+        style = MaterialTheme.typography.labelMedium,
+        color = color,
+        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp),
+    )
+}
+
 private fun CleanupPane(
     fileChannel: SyncChannel?,
+    /** 信息面（REST）：用来判断"别的设备有没有副本、状态是否一致"。 */
+    infoChannel: SyncChannel?,
     folder: Folder,
     selection: SelectionSets,
+    localDeviceId: String?,
     onRowsGone: (List<String>) -> Unit,
     onMessage: (String) -> Unit,
+    /** 保留下来的文件要不要纳入同步（改 .stignore 放行）。 */
+    onIncludeInSync: (List<String>) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
-    var excess by remember(folder.id) { mutableStateOf(emptyList<String>()) }
+    var excess by remember(folder.id) { mutableStateOf(emptyList<ExcessItem>()) }
     var chosen by remember(folder.id) { mutableStateOf(emptySet<String>()) }
     var scanning by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
@@ -1311,8 +1472,8 @@ private fun CleanupPane(
     var confirmDelete by remember { mutableStateOf(false) }
 
     fun scan() {
-        val channel = fileChannel
-        if (channel == null) {
+        val disk = fileChannel
+        if (disk == null) {
             onMessage("这个文件夹还没配文件通道，扫不了磁盘上的残留。")
             return
         }
@@ -1322,12 +1483,21 @@ private fun CleanupPane(
         chosen = emptySet()
         progressLabel = "扫描目录…"
         scope.launch {
-            val found = scanExcess(channel, folder.id, selection) { done, _, hits ->
+            val found = scanExcess(
+                diskChannel = disk,
+                infoChannel = infoChannel,
+                folderId = folder.id,
+                selection = selection,
+                localDeviceId = localDeviceId,
+            ) { done, _, hits ->
                 scanned = done
                 progressLabel = "已扫 $done 个目录，发现 $hits 项多余文件"
             }
             excess = found
-            chosen = found.toSet()
+            // 默认只勾"确认安全"的文件；目录不自动勾 —— 删父目录会带走
+            // 里面可能想保留的子项，这类决定必须让用户自己下。
+            chosen = found.filter { it.kind == ExcessKind.SAFE && !it.dir }
+                .map { it.path }.toSet()
             scanning = false
             progressLabel = null
         }
@@ -1338,7 +1508,7 @@ private fun CleanupPane(
     Column(modifier = modifier.padding(horizontal = 16.dp)) {
         Text(
             "按当前目录树状态，下面这些文件本不该出现在目标设备上" +
-                "（已忽略但磁盘上还在）。勾上再删。",
+                "（已忽略但磁盘上还在）。危险的分在前面，默认都不勾。",
             style = MaterialTheme.typography.bodySmall,
         )
 
@@ -1354,11 +1524,25 @@ private fun CleanupPane(
             Spacer(modifier = Modifier.width(8.dp))
             TextButton(
                 onClick = {
-                    chosen = if (chosen.size == excess.size) emptySet() else excess.toSet()
+                    val all = excess.map { it.path }.toSet()
+                    chosen = if (chosen.size == all.size) emptySet() else all
                 },
                 enabled = excess.isNotEmpty() && !deleting,
             ) {
-                Text(if (chosen.size == excess.size && excess.isNotEmpty()) "全不选" else "全选")
+                Text(
+                    if (chosen.size == excess.size && excess.isNotEmpty()) "全不选" else "全选",
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            // 只勾"确认安全"的，把危险的（只有本机一份 / 状态对不上）排除掉
+            TextButton(
+                onClick = {
+                    chosen = excess.filter { it.kind == ExcessKind.SAFE && !it.dir }
+                        .map { it.path }.toSet()
+                },
+                enabled = excess.isNotEmpty() && !deleting,
+            ) {
+                Text("只选安全的")
             }
         }
 
@@ -1387,29 +1571,51 @@ private fun CleanupPane(
 
             else -> {
                 LazyColumn(modifier = Modifier.weight(1f)) {
-                    itemsIndexed(excess) { _, path ->
-                        val on = chosen.contains(path)
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable(enabled = !deleting) {
-                                    chosen = if (on) chosen - path else chosen + path
+                    // 参数名不能叫 item —— 会遮蔽 LazyListScope.item() 函数，编译不过
+                    itemsIndexed(excess) { index, entry ->
+                        val on = chosen.contains(entry.path)
+                        // 换分组时插一行小标题，让"危险"和"安全"一眼分得开
+                        if (index == 0 || excess[index - 1].kind != entry.kind) {
+                            item(key = "hdr_" + entry.kind) { ExcessGroupHeader(entry.kind) }
+                        }
+                        item(key = entry.path) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !deleting) {
+                                        chosen =
+                                            if (on) chosen - entry.path else chosen + entry.path
+                                    }
+                                    .padding(vertical = 4.dp),
+                            ) {
+                                Checkbox(
+                                    checked = on,
+                                    onCheckedChange = { want ->
+                                        chosen =
+                                            if (want) chosen + entry.path else chosen - entry.path
+                                    },
+                                    enabled = !deleting,
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        entry.path + if (entry.dir) "/" else "",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                    Text(
+                                        entry.note,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = when (entry.kind) {
+                                            ExcessKind.ONLY_LOCAL, ExcessKind.UNKNOWN ->
+                                                MaterialTheme.colorScheme.error
+                                            ExcessKind.RESYNC ->
+                                                MaterialTheme.colorScheme.tertiary
+                                            ExcessKind.SAFE ->
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                    )
                                 }
-                                .padding(vertical = 4.dp),
-                        ) {
-                            Checkbox(
-                                checked = on,
-                                onCheckedChange = { want ->
-                                    chosen = if (want) chosen + path else chosen - path
-                                },
-                                enabled = !deleting,
-                            )
-                            Text(
-                                path,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.weight(1f),
-                            )
+                            }
                         }
                     }
                 }
@@ -1422,9 +1628,20 @@ private fun CleanupPane(
                 enabled = chosen.isNotEmpty() && !deleting,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 8.dp),
+                    .padding(top = 8.dp),
             ) {
                 Text(if (deleting) "删除中…" else "删除选中的 ${chosen.size} 项")
+            }
+            // 剩下的这些是用户决定保留的：要么就地留着（仍在同步范围外），
+            // 要么纳入同步——不处理的话它们一直是"多余项"，每次扫描都会冒出来。
+            OutlinedButton(
+                onClick = { onIncludeInSync(excess.map { it.path }) },
+                enabled = !deleting,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+            ) {
+                Text("把保留的 ${excess.size} 项纳入同步")
             }
         }
     }
@@ -1436,7 +1653,10 @@ private fun CleanupPane(
         deleting = true
         scanned = 0
         progressLabel = "准备删除…"
-        val targets = chosen.toList()
+        // 只保留顶层：勾了 a 又勾了 a/b 时，删掉 a 就够了，别重复删。
+        // 同时保证删除只作用于用户勾选的这一层 —— 绝不会顺带删掉它们的父目录，
+        // 这样"子项要保留、父项要删除"的组合才不会把保留的那份一起带走。
+        val targets = topLevelPaths(chosen)
         scope.launch {
             var reported = 0
             val result = withContext(Dispatchers.IO) {
@@ -1452,8 +1672,9 @@ private fun CleanupPane(
             if (result == null) {
                 onMessage("删除失败：文件通道没有返回结果")
             } else {
-                excess = excess - result.deleted.toSet()
-                chosen = chosen - result.deleted.toSet()
+                val gone = result.deleted.toSet()
+                excess = excess.filter { it.path !in gone }
+                chosen = chosen - gone
                 onRowsGone(result.deleted)
                 val notes = ArrayList<String>()
                 notes.add("已删除 ${result.deleted.size} 项")
@@ -1465,6 +1686,10 @@ private fun CleanupPane(
                                 .joinToString("；") { "${it.key} → ${it.value}" },
                         )
                     }
+                }
+                // 保留下来的既留在磁盘又不参与同步，下次扫描还会被当成多余 —— 提醒一声
+                if (excess.isNotEmpty()) {
+                    notes.add("还有 ${excess.size} 项保留着，可点下方「纳入同步」")
                 }
                 onMessage(notes.joinToString("；"))
             }

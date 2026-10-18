@@ -38,10 +38,33 @@ data class RemoteInfo(
     val directory: Boolean = false,
     /** 持有该文件副本的设备 ID 列表。 */
     val availability: List<String> = emptyList(),
+    /** 全局模型记录的大小；小于 0 表示这一侧的通道拿不到（SMB/FTP 等没有这条信息）。 */
+    val size: Long = -1L,
+    /** 全局模型记录的修改时间（原样字符串），拿不到时为空。 */
+    val modified: String = "",
+    /** 全局模型是否已把它标记为忽略。 */
+    val ignored: Boolean = false,
 ) {
-    /** 除本机之外是否还有其它设备持有它。 */
+    /**
+     * 除本机之外是否还有其它设备持有它。
+     *
+     * 必须排除本机：要删的正是本机这一份，本机持有并不代表删掉之后还有备份。
+     * 只看"availability 非空"会把"仅此一份"误判成安全，那正是会丢数据的地方。
+     */
     fun hasRemoteCopy(localDeviceId: String?): Boolean {
         return availability.any { it != localDeviceId }
+    }
+
+    /**
+     * 与本地这一份比对状态是否一致。
+     *
+     * @return true 一致、false 不一致、null 信息不足无法判断（此时不能当作一致）。
+     */
+    fun matchesLocal(localSize: Long): Boolean? {
+        if (size < 0L || localSize < 0L) {
+            return null
+        }
+        return size == localSize
     }
 }
 
