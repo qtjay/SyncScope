@@ -185,22 +185,21 @@ private suspend fun subtreeMayDiffer(
  * 命中整棵子树的目录不再往下钻 —— 整棵都是多余的，直接整棵删。
  */
 /**
- * 多余项的判定分类，决定默认勾不勾、以及要提示用户什么。
+ * 多余项的分类，决定默认勾不勾、以及要提示用户什么。
  *
- * 顺序即展示顺序：ONLY_LOCAL 最危险，必须排在最前面先提醒用户。
+ * <p>顺序即展示顺序：ROOT_NEW 必须排在最前面先提醒用户。
+ *
+ * <p>判断被大幅简化过：目录被忽略本身就说明用户不打算要它，正常流程也是
+ * 忽略后立刻来这里删掉，里面根本没机会再新增东西。所以**凡是被 .stignore
+ * 覆盖的一律直接删**，只有"根目录下新增"这一种情况要单独标记 ——
+ * 那通常是用户刚放进去、还没来得及勾选的，得让他自己看一眼。
  */
 enum class ExcessKind {
-    /** 只有本机这一份，删了就永久丢失 —— 必须由用户显式确认。 */
-    ONLY_LOCAL,
+    /** 根目录下新增、且远端索引里没有 —— 需用户确认，默认不勾。 */
+    ROOT_NEW,
 
-    /** 其他设备有副本，但两边状态对不上 —— 该重新同步，而不是直接删。 */
-    RESYNC,
-
-    /** 其他设备有相同的副本 —— 删掉本机这一份不会丢数据。 */
-    SAFE,
-
-    /** 查不到足够信息，无法判断 —— 一律不自动删。 */
-    UNKNOWN,
+    /** 已被忽略规则覆盖 —— 按定义就该删掉，默认勾上。 */
+    IGNORED,
 }
 
 /** 一个"按当前勾选本不该存在"的条目，连同它的判定结果。 */
@@ -216,12 +215,9 @@ data class ExcessItem(
 /**
  * 给一个多余项分类。
  *
- * <p>判定顺序很关键：
- * <ol>
- *   <li>查不到 / 不在全局模型 → 只有本机有，绝不能自动删；</li>
- *   <li>扣掉本机后没人持有 → 同样只有本机有；</li>
- *   <li>有人持有 → 再比对状态，对不上就提示重新同步而不是删。</li>
- * </ol>
+ * <p>只有一种情况需要单独标记：位于**根目录**、且远端索引里查不到它 ——
+ * 那多半是用户刚放进去、还没来得及勾选的东西。
+ * 其余一律按"被忽略规则覆盖"处理，直接删。
  */
 private fun classifyExcess(
     path: String,
@@ -230,38 +226,24 @@ private fun classifyExcess(
     info: RemoteInfo?,
     localDeviceId: String?,
 ): ExcessItem {
-    if (info == null) {
-        return ExcessItem(path, dir, localSize, ExcessKind.UNKNOWN,
-            "查不到远端状态，不能自动删")
+    // 唯一的例外：位于根目录（路径里没有分隔符）、且远端索引里查不到它。
+    // 这是用户刚放进去、还没勾选的东西 —— 删了会丢，必须让他先看到。
+    val atRoot = !path.contains("/")
+    val unknownToRemote = info == null || !info.exists
+    if (atRoot && unknownToRemote) {
+        return ExcessItem(path, dir, localSize, ExcessKind.ROOT_NEW,
+            "根目录下新增，远端还没有它 —— 请确认是否保留")
     }
-    if (!info.exists) {
-        return ExcessItem(path, dir, localSize, ExcessKind.ONLY_LOCAL,
-            "全局模型里没有它，只有本机这一份")
+    val note = if (info == null) {
+        "已被忽略规则覆盖（远端状态查不到）"
+    } else if (info.hasRemoteCopy(localDeviceId)) {
+        "已被忽略规则覆盖，其它设备仍有副本"
+    } else {
+        // 远端没副本也照样删：这个路径是被忽略规则点名排除的，
+        // 用户既然把它排除在同步之外，留在磁盘上就没有意义。
+        "已被忽略规则覆盖，远端没有副本"
     }
-    if (!info.hasRemoteCopy(localDeviceId)) {
-        return ExcessItem(path, dir, localSize, ExcessKind.ONLY_LOCAL,
-            "远端没有这个文件的副本（除本机外无人持有），删除将永久丢失")
-    }
-    // 规则一要求的那一步：确认远端确实已同步过这份（不只"存在记录"）。
-    // Syncthing 的 availability 就是"谁持有当前版本"，据此可判断同步是否完成。
-    if (!info.isInSyncWith(localDeviceId) && !info.ignoredLocal) {
-        return ExcessItem(path, dir, localSize, ExcessKind.RESYNC,
-            "本机这份还没与远端同步完成，先同步再删，否则会丢改动")
-    }
-    // 有别的设备持有。目录不做大小比对（各通道对目录大小的定义不一致），
-    // 只对文件比对，避免"内容变了但大小没变"之外的误判。
-    if (dir || localSize < 0L) {
-        return ExcessItem(path, dir, localSize, ExcessKind.SAFE,
-            "其它设备持有该副本")
-    }
-    return when (info.matchesLocal(localSize)) {
-        true -> ExcessItem(path, dir, localSize, ExcessKind.SAFE,
-            "其它设备有相同副本")
-        false -> ExcessItem(path, dir, localSize, ExcessKind.RESYNC,
-            "其它设备副本大小不同（本机 $localSize，远端 ${info.size}），可能已改动未同步")
-        null -> ExcessItem(path, dir, localSize, ExcessKind.UNKNOWN,
-            "拿不到大小信息，无法比对状态")
-    }
+    return ExcessItem(path, dir, localSize, ExcessKind.IGNORED, note)
 }
 
 private suspend fun scanExcess(
@@ -304,11 +286,10 @@ private suspend fun scanExcess(
                         val path = if (prefix.isEmpty()) name else "$prefix/$name"
                         val dir = entry.isDirectory()
                         if (isExcess(path, dir, selection)) {
+                            // 命中即停：整棵都是被忽略的，删掉父目录就够了，
+                            // 不必再进去逐条看 —— 这也是扫描能快的主要原因
                             synchronized(hits) {
                                 hits.add(Hit(path, dir, if (dir) -1L else entry.size, depth))
-                            }
-                            if (dir && dive && depth < SCAN_MAX_DEPTH) {
-                                synchronized(next) { next.add(path to depth + 1) }
                             }
                         } else if (dir && dive) {
                             synchronized(next) { next.add(path to depth + 1) }
@@ -330,64 +311,10 @@ private suspend fun scanExcess(
     val classified = hits
         .map { classifyExcess(it.path, it.dir, it.size, probed[it.path], localDeviceId) }
 
-    // 到了深度上限就没继续下钻的目录：子树没看全，不能当成已确认
-    val truncated = HashSet<String>()
-    for (hit in hits) {
-        if (hit.dir && hit.depth >= SCAN_MAX_DEPTH) {
-            truncated.add(hit.path)
-        }
-    }
-
-    // 统计每个目录下"不安全"的后代数量（只跳过 SAFE，RESYNC/ONLY_LOCAL 都算风险：
-    // 状态对不上或远端没有，都不能整棵删）
-    val riskyByParent = HashMap<String, Int>()
-    val riskyKinds = HashMap<String, MutableSet<ExcessKind>>()
-    for (item in classified) {
-        if (item.kind == ExcessKind.SAFE) {
-            continue
-        }
-        var slash = item.path.indexOf('/')
-        while (slash > 0) {
-            val parent = item.path.substring(0, slash)
-            riskyByParent[parent] = (riskyByParent[parent] ?: 0) + 1
-            riskyKinds.getOrPut(parent) { LinkedHashSet() }.add(item.kind)
-            slash = item.path.indexOf('/', slash + 1)
-        }
-    }
-
-    val decided = classified.map { item ->
-        if (!item.dir) {
-            return@map item
-        }
-        if (item.path in truncated) {
-            return@map item.copy(
-                kind = ExcessKind.UNKNOWN,
-                note = "层级较深，未自动深入校验，展开后再确认",
-            )
-        }
-        val risky = riskyByParent[item.path] ?: 0
-        if (risky == 0) {
-            item.copy(kind = ExcessKind.SAFE, note = "子树已全部校验通过，可整棵删除")
-        } else {
-            // 说清不安全在哪儿：远端没副本 / 状态对不上 / 查不到，
-            // 不然用户只知道"不安全"，却不知道该看哪一项
-            val kinds = riskyKinds[item.path] ?: emptySet()
-            val why = when {
-                ExcessKind.ONLY_LOCAL in kinds -> "含远端没有副本的项，删了就没了"
-                ExcessKind.RESYNC in kinds -> "含与远端状态不一致的项，可能丢改动"
-                else -> "含查不到远端状态的项"
-            }
-            item.copy(
-                kind = ExcessKind.UNKNOWN,
-                note = "子树里 $risky 项不安全（$why），展开后逐项确认",
-            )
-        }
-    }
-
     // 只保留顶层：父目录已经列出来了，里面几十上百条再逐条铺开，列表会长到没法看，
     // 用户还得一条条确认才敢下手。要看细节就点「展开」，那时才去加载这一层。
-    val topOnly = decided.filter { item ->
-        decided.none { other ->
+    val topOnly = classified.filter { item ->
+        classified.none { other ->
             other.dir && other.path != item.path && item.path.startsWith("${other.path}/")
         }
     }
@@ -1515,15 +1442,12 @@ private sealed class CleanupRow {
 @Composable
 private fun ExcessGroupHeader(kind: ExcessKind) {
     val title = when (kind) {
-        ExcessKind.ONLY_LOCAL -> "⚠ 只有本机这一份 —— 默认不勾，删了就永久丢失"
-        ExcessKind.RESYNC -> "⟳ 其它设备有副本但状态对不上 —— 建议重新同步，别直接删"
-        ExcessKind.SAFE -> "✓ 其它设备有相同副本 —— 可安全删除"
-        ExcessKind.UNKNOWN -> "? 无法判断 —— 默认不勾"
+        ExcessKind.ROOT_NEW -> "⚠ 根目录下新增 —— 默认不勾，先确认是新放的还是要删"
+        ExcessKind.IGNORED -> "✓ 已被忽略规则覆盖 —— 默认勾上，直接删除"
     }
     val color = when (kind) {
-        ExcessKind.ONLY_LOCAL, ExcessKind.UNKNOWN -> MaterialTheme.colorScheme.error
-        ExcessKind.RESYNC -> MaterialTheme.colorScheme.tertiary
-        ExcessKind.SAFE -> MaterialTheme.colorScheme.primary
+        ExcessKind.ROOT_NEW -> MaterialTheme.colorScheme.error
+        ExcessKind.IGNORED -> MaterialTheme.colorScheme.primary
     }
     Text(
         title,
@@ -1622,18 +1546,8 @@ private fun CleanupPane(
                     runCatching { it.remoteInfoBatch(folder.id, hits.map { it.first }) }.getOrNull()
                 } ?: emptyMap()
                 hits.map { (childPath, meta) ->
-                    val item = classifyExcess(childPath, meta.first, meta.second,
+                    classifyExcess(childPath, meta.first, meta.second,
                         probed[childPath], localDeviceId)
-                    // 展开出来的子目录还没往下钻过，不能当成"已确认安全"，
-                    // 标记出来让用户自己看一眼再决定
-                    if (meta.first) {
-                        item.copy(
-                            kind = ExcessKind.UNKNOWN,
-                            note = "展开得到的目录，未继续深入校验，确认后再删",
-                        )
-                    } else {
-                        item
-                    }
                 }
             }
             children = children + (path to loaded)
@@ -1683,7 +1597,8 @@ private fun CleanupPane(
             excess = found
             // 目录也一起勾：只删文件不删目录会留下一地空目录。
             // 真要保留某个子项时，展开该目录再单独取消即可。
-            chosen = found.filter { it.kind == ExcessKind.SAFE }.map { it.path }.toSet()
+            // 被忽略的一律勾上；根目录下新增的不勾，交给用户确认
+            chosen = found.filter { it.kind == ExcessKind.IGNORED }.map { it.path }.toSet()
             scanning = false
             progressLabel = null
         }
@@ -1757,19 +1672,19 @@ private fun CleanupPane(
                 )
             }
             Spacer(modifier = Modifier.width(8.dp))
-            // 只勾"确认安全"的，把危险的（只有本机一份 / 状态对不上）排除掉
+            // 恢复默认：勾上所有被忽略的，根目录新增的保持不勾
             TextButton(
                 onClick = {
-                    val safe = excess.filter { it.kind == ExcessKind.SAFE }
+                    val picked = excess.filter { it.kind == ExcessKind.IGNORED }
                         .map { it.path }.toSet()
                     // 父整棵勾上时清掉子项的独立勾选，避免同一棵被记两次
-                    chosen = safe.filter { path ->
-                        safe.none { other -> other != path && path.startsWith("$other/") }
+                    chosen = picked.filter { path ->
+                        picked.none { other -> other != path && path.startsWith("$other/") }
                     }.toSet()
                 },
                 enabled = excess.isNotEmpty() && !deleting,
             ) {
-                Text("只选安全的")
+                Text("只选被忽略的")
             }
         }
 
@@ -1837,11 +1752,9 @@ private fun CleanupPane(
                                             entry.note,
                                             style = MaterialTheme.typography.labelSmall,
                                             color = when (entry.kind) {
-                                                ExcessKind.ONLY_LOCAL, ExcessKind.UNKNOWN ->
+                                                ExcessKind.ROOT_NEW ->
                                                     MaterialTheme.colorScheme.error
-                                                ExcessKind.RESYNC ->
-                                                    MaterialTheme.colorScheme.tertiary
-                                                ExcessKind.SAFE ->
+                                                ExcessKind.IGNORED ->
                                                     MaterialTheme.colorScheme.onSurfaceVariant
                                             },
                                         )
@@ -1855,9 +1768,9 @@ private fun CleanupPane(
                                             Text(if (open) "收起" else "展开")
                                         }
                                     }
-                                    // 远端没有副本的：要么删（会丢），要么保留 —— 保留就立刻纳入同步，
-                                    // 否则它永远是个"多余项"，每次扫描都冒出来。
-                                    if (entry.kind == ExcessKind.ONLY_LOCAL) {
+                                    // 根目录下新增的：保留 = 立刻纳入同步（改 .stignore 放行），
+                                    // 否则它每次扫描都会被当成"多余"冒出来
+                                    if (entry.kind == ExcessKind.ROOT_NEW) {
                                         TextButton(
                                             onClick = {
                                                 onIncludeInSync(listOf(entry.path))
