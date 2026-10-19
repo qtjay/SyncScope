@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 
 import com.qtjay.syncscope.channel.RemoteInfo
 import com.qtjay.syncscope.channel.SyncChannel
+import com.qtjay.syncscope.channel.TestResult
 import com.qtjay.syncscope.core.model.BrowseEntry
 import com.qtjay.syncscope.core.model.Folder
 import com.qtjay.syncscope.core.model.FolderStatus
@@ -387,6 +388,10 @@ fun FolderScreen(
 
     /** 打开时读到的基准勾选，用于计算"本次取消了哪些"。 */
     var baseline by remember { mutableStateOf(SelectionSets()) }
+    /** 文件通道可达性检测结果；null 表示还没测或没配文件通道。 */
+    var fileChannelProbe by remember(folder.id, fileChannel) { mutableStateOf<TestResult?>(null) }
+    /** 文件通道是否正在检测中。 */
+    var fileChannelProbing by remember(folder.id, fileChannel) { mutableStateOf(false) }
     /** 取消勾选触发的祖先拆分还没做完；保存前必须等它，否则写出去的是旧状态。 */
     var pendingToggle by remember { mutableStateOf<Job?>(null) }
     /** 目录树最近一次从远端取回的时间。 */
@@ -1051,6 +1056,25 @@ fun FolderScreen(
         }
     }
 
+    /**
+     * 文件通道可达性：进入页面就测一次，之后每次 fileChannel 变化（在「文件通道」页
+     * 改完配置回来）也重测。
+     *
+     * <p>单独一个 effect，不并进上面那个以 folder.id 为 key 的初始化块 ——
+     * 否则改一次通道配置就要把整棵目录树重新加载一遍。
+     *
+     * <p>不可达的代价不只是"删不了文件"：目录树也会只剩远端索引，
+     * 磁盘上真实新增的内容根本看不见，所以必须一进页面就说清楚。
+     */
+    LaunchedEffect(folder.id, fileChannel) {
+        val probe = fileChannel ?: return@LaunchedEffect
+        fileChannelProbing = true
+        fileChannelProbe = withContext(Dispatchers.IO) {
+            runCatching { probe.test() }.getOrNull()
+        }
+        fileChannelProbing = false
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -1065,6 +1089,28 @@ fun FolderScreen(
             Text(
                 "${status.stateLabel()} · ${status.fileSummary()} · ${status.completionPercent()}%",
                 style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+        }
+
+        // 文件通道可达性：不可达时不只是"删不了文件"，目录树也会只剩远端索引，
+        // 磁盘上真实新增的内容根本看不见。放在最显眼的位置，一进页面就看到。
+        val fileProbe = fileChannelProbe
+        when {
+            fileChannel != null && fileChannelProbing -> Text(
+                "正在检测文件通道…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+
+            fileProbe != null && !fileProbe.ok -> Text(
+                "文件通道不可达：${fileProbe.error ?: "未知原因"}。" +
+                    "此时目录树看不到对方磁盘上的真实内容，" +
+                    "取消勾选也只会写入忽略规则、不会删除文件。" +
+                    "请到「文件通道」页检查配置后重试。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             )
         }
