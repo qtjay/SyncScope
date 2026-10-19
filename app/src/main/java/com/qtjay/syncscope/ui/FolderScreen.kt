@@ -38,9 +38,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,11 +54,13 @@ import com.qtjay.syncscope.core.model.BrowseEntry
 import com.qtjay.syncscope.core.model.Folder
 import com.qtjay.syncscope.core.model.FolderStatus
 import com.qtjay.syncscope.core.pattern.SelectiveSyncPatterns
+import com.qtjay.syncscope.core.pattern.patternMatchesPath
 import com.qtjay.syncscope.data.CachedRow
 import com.qtjay.syncscope.data.TreeCache
 import com.qtjay.syncscope.data.TreeSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -129,55 +132,6 @@ private const val SCAN_WAIT_MS = 600_000L
 private const val SCAN_MAX_DEPTH = 4
 
 /**
- * 某一层内容的"指纹"：条目数 + 文件总大小（目录自身不算大小）。
- *
- * 两边指纹相同就认为这一层没有差异。碰撞的可能极小（数量与总字节同时对上），
- * 换来的是不必再往下钻 —— 这是整个扫描最主要的性能来源。
- */
-private fun layerSignature(entries: List<BrowseEntry>): String {
-    var count = 0
-    var total = 0L
-    val names = ArrayList<String>()
-    for (entry in entries) {
-        val name = entry.name
-        if (name == null || name.isEmpty() || name == "." || name == "..") {
-            continue
-        }
-        if (PROTECTED_NAMES.contains(name)) {
-            continue
-        }
-        count++
-        names.add(name)
-        if (!entry.isDirectory()) {
-            total += entry.size
-        }
-    }
-    // 光靠"条目数 + 总大小"理论上会碰撞（数量与字节都对上、但文件其实不同）。
-    // 名字本来就在返回的条目里，顺手加进去排序后取哈希 —— 不额外花一次请求，
-    // 却把碰撞概率压到可以忽略。
-    names.sort()
-    return "$count/$total/" + names.hashCode()
-}
-
-/**
- * 这一层的本地内容与远端（全局模型）内容是否可能不同。
- *
- * 拿不到远端信息时返回 true —— 保守地继续下钻，宁可慢也不能漏判。
- */
-private suspend fun subtreeMayDiffer(
-    folderId: String,
-    prefix: String,
-    diskEntries: List<BrowseEntry>,
-    infoChannel: SyncChannel?,
-): Boolean {
-    val info = infoChannel ?: return true
-    val remote = withContext(Dispatchers.IO) {
-        runCatching { info.tree(folderId, prefix) }.getOrNull()
-    } ?: return true
-    return layerSignature(diskEntries) != layerSignature(remote)
-}
-
-/**
  * 扫描"按当前目录树状态应当忽略、却仍留在目标设备上的文件"。
  *
  * <p>判定完全走三桶勾选状态（fullDirs / partialDirs / files），与生成 .stignore
@@ -246,6 +200,18 @@ private fun classifyExcess(
     return ExcessItem(path, dir, localSize, ExcessKind.IGNORED, note)
 }
 
+/**
+ * 扫描"按当前目录树状态应当忽略、却仍留在目标设备上的文件"。
+ *
+ * <p>判定完全走三桶勾选状态（fullDirs / partialDirs / files），与生成 .stignore
+ * 的是同一份数据，所以不会出现"规则说忽略、界面说同步"的口径打架。
+ * 命中整棵子树的目录不再往下钻 —— 整棵都是多余的，直接整棵删。
+ *
+ * <p><b>下钻条件不能用"文件通道 vs 远端索引"的指纹</b>：被忽略的文件**仍然在全局模型里**，
+ * 所以一个已经同步的目录，两边看到的内容永远一致，指纹永远相同 ——
+ * 用它剪枝会导致永远发现不了深层被忽略的子项（实测表现就是"校验文件扫不到任何文件"）。
+ * 正确依据是勾选状态本身：整棵放行的目录不必下钻，其余一律下钻。
+ */
 private suspend fun scanExcess(
     /** 文件通道：扫目标设备上的真实磁盘。 */
     diskChannel: SyncChannel,
@@ -270,15 +236,6 @@ private suspend fun scanExcess(
                 async {
                     val entries = runCatching { diskChannel.tree(folderId, prefix) }
                         .getOrDefault(emptyList())
-                    // 剪枝：本地与远端这一层的"条目数 + 总大小"一致，
-                    // 说明子树没有差异，不必再往下钻。大文件夹里绝大多数目录
-                    // 都是一致的，这是把扫描时间压下来的关键。
-                    val dive = depth >= SCAN_MAX_DEPTH || subtreeMayDiffer(
-                        folderId = folderId,
-                        prefix = prefix,
-                        diskEntries = entries,
-                        infoChannel = infoChannel,
-                    )
                     for (entry in entries) {
                         val name = entry.name ?: continue
                         if (name.isEmpty() || name == "." || name == "..") continue
@@ -291,7 +248,10 @@ private suspend fun scanExcess(
                             synchronized(hits) {
                                 hits.add(Hit(path, dir, if (dir) -1L else entry.size, depth))
                             }
-                        } else if (dir && dive) {
+                        } else if (dir && depth < SCAN_MAX_DEPTH &&
+                            selection.fullDirs.none { patternMatchesPath(it, path) }) {
+                            // 整棵放行的目录不必下钻（里面必然全部同步）；
+                            // 其余一律下钻 —— 被忽略的子项不体现在"两边内容差异"里。
                             synchronized(next) { next.add(path to depth + 1) }
                         }
                     }
@@ -335,15 +295,20 @@ private suspend fun scanExcess(
 /**
  * 判断某个真实存在的路径是否"多余"—— 即按当前勾选它本不该出现在目标设备上。
  *
+ * <p>比较必须走 [patternMatchesPath]：规则里的路径可能是退化形式
+ * （名称以 `(` 开头被写成 `?`）。直接用字符串相等会把已勾选的整棵目录
+ * 判成多余、建议删掉 —— 那是真的会丢数据的。
+ *
  * 只有三种情况要保留：整棵子树被放行、自己被放行（目录或文件）、
  * 或者是某个被放行项的祖先（没有中间目录就进不去）。
  */
 private fun isExcess(path: String, dir: Boolean, selection: SelectionSets): Boolean {
-    if (selection.fullDirs.contains(path)) return false
-    if (selection.partialDirs.contains(path) || selection.files.contains(path)) return false
+    if (selection.fullDirs.any { patternMatchesPath(it, path) }) return false
+    if (selection.partialDirs.any { patternMatchesPath(it, path) }) return false
+    if (selection.files.any { patternMatchesPath(it, path) }) return false
     var slash = path.indexOf('/')
     while (slash > 0) {
-        if (selection.fullDirs.contains(path.substring(0, slash))) return false
+        if (selection.fullDirs.any { patternMatchesPath(it, path.substring(0, slash)) }) return false
         slash = path.indexOf('/', slash + 1)
     }
     // 目录还可能是"通往被放行项的中间层"，没了它里面的选中项也进不去
@@ -422,6 +387,8 @@ fun FolderScreen(
 
     /** 打开时读到的基准勾选，用于计算"本次取消了哪些"。 */
     var baseline by remember { mutableStateOf(SelectionSets()) }
+    /** 取消勾选触发的祖先拆分还没做完；保存前必须等它，否则写出去的是旧状态。 */
+    var pendingToggle by remember { mutableStateOf<Job?>(null) }
     /** 目录树最近一次从远端取回的时间。 */
     var treeUpdatedAt by remember { mutableStateOf(0L) }
     var loading by remember { mutableStateOf(true) }
@@ -503,6 +470,10 @@ fun FolderScreen(
      *       只看桶会一直显示全勾，实际应该是半选；</li>
      *   <li>父目录没勾但子项被逐个勾满时，只看桶会一直是半选，实际应该是全勾。</li>
      * </ul>
+     *
+     * <p>聚合时**不能只数 ON 的子项**：子项是 PARTIAL 也说明"这里有内容在同步"，
+     * 漏数它会让"有一个子项部分选中"的父目录被判成 OFF —— 那正是
+     * "电影"文件夹显示取消勾选的原因。
      */
     fun stateOf(row: TreeRow): TriState {
         if (hasSelectedAncestor(row.path)) {
@@ -519,10 +490,10 @@ fun FolderScreen(
         if (kids.isEmpty()) {
             return if (partialDirs.containsKey(row.path)) TriState.PARTIAL else TriState.OFF
         }
-        val on = kids.count { stateOf(it) == TriState.ON }
+        val states = kids.map { stateOf(it) }
         return when {
-            on == 0 -> TriState.OFF
-            on == kids.size -> TriState.ON
+            states.all { it == TriState.ON } -> TriState.ON
+            states.all { it == TriState.OFF } -> TriState.OFF
             else -> TriState.PARTIAL
         }
     }
@@ -566,8 +537,7 @@ fun FolderScreen(
      * <p>默认只走 REST 的全局模型，那就只看得到"远端有的"。
      * 配了文件通道时再叠一层真实磁盘 —— 磁盘上新出现、还没进索引的东西
      * 也要显示在树上（默认未勾选），否则用户根本不知道它存在。
-     */
-    suspend fun fetchChildren(prefix: String): List<TreeRow> {
+     */    suspend fun fetchChildren(prefix: String): List<TreeRow> {
         val remote = withContext(Dispatchers.IO) {
             runCatching { channel.tree(folder.id, prefix) }.getOrDefault(emptyList())
         }
@@ -616,6 +586,66 @@ fun FolderScreen(
     }
 
     /**
+     * 把反解出来的路径还原成目录树里的真实路径。
+     *
+     * <p>目录树里找不到原样匹配时，按 glob 语义找：规则里的 `?` 匹配任意单字符，
+     * 这正是生成侧对"名称以 ( 开头"的兜底写法。找不到就原样返回。
+     */
+    fun realPath(path: String): String {
+        if (rows.any { it.path == path }) {
+            return path
+        }
+        return rows.firstOrNull { patternMatchesPath(path, it.path) }?.path ?: path
+    }
+
+    /**
+     * 把勾选集合的 key 对齐到目录树里的真实路径，并按真实类型重新分桶。
+     *
+     * <p>两件事都必须做，缺一不可：
+     * <ol>
+     *   <li><b>还原 key</b>：反解出来的路径可能是退化形式（名称以 `(` 开头被写成 `?`），
+     *       当时目录树还没加载到那一层时无法还原；</li>
+     *   <li><b>重新分桶</b>：rows 还没加载到那一层时，`dirKind` 返回 null，
+     *       `applyParsed` 只能把路径先塞进 partialDirs —— **文件也会被塞进去**。
+     *       而 `stateOf` 对文件只查 selectedFiles，所以它会永远显示"未勾选"。
+     *       等展开加载到真实行之后，必须把放错桶的挪回去。</li>
+     * </ol>
+     *
+     * <p>只改 key 不动桶是不够的 —— 那正是"没取消的文件第二次打开显示取消"的原因。
+     */
+    fun alignSelectionKeys() {
+        if (rows.isEmpty()) {
+            return
+        }
+        fun realign(map: SnapshotStateMap<String, Boolean>) {
+            for (key in map.keys.toList()) {
+                val real = realPath(key)
+                if (real != key) {
+                    map.remove(key)
+                    map[real] = true
+                }
+            }
+        }
+        realign(fullDirs)
+        realign(partialDirs)
+        realign(selectedFiles)
+        // 重新分桶：partialDirs 里混进来的文件挪到 selectedFiles
+        for (key in partialDirs.keys.toList()) {
+            if (dirKind(key) == false) {
+                partialDirs.remove(key)
+                selectedFiles[key] = true
+            }
+        }
+        // selectedFiles 里混进来的目录挪到 partialDirs
+        for (key in selectedFiles.keys.toList()) {
+            if (dirKind(key) == true) {
+                selectedFiles.remove(key)
+                partialDirs[key] = true
+            }
+        }
+    }
+
+    /**
      * 把反解出来的勾选写回界面。
      *
      * <p>没有托管块 = 目标端没有忽略规则 = 全部同步 → 所有已加载的行都打勾；
@@ -633,18 +663,22 @@ fun FolderScreen(
             return
         }
         for (path in parsed.fullDirs) {
-            fullDirs[path] = true
+            fullDirs[realPath(path)] = true
         }
         for (path in parsed.selectedPaths) {
             if (parsed.fullDirs.contains(path)) {
                 continue
             }
-            when (dirKind(path)) {
-                true -> partialDirs[path] = true
-                false -> selectedFiles[path] = true
-                else -> partialDirs[path] = true
+            // 必须先还原成目录树里的真实名字再判断类型：
+            // 退化路径在 rows 里查不到，dirKind 会返回 null 把文件误放进 partialDirs
+            val real = realPath(path)
+            when (dirKind(real)) {
+                true -> partialDirs[real] = true
+                false -> selectedFiles[real] = true
+                else -> partialDirs[real] = true
             }
         }
+        alignSelectionKeys()
     }
 
     /** 重新读取远端：忽略规则 + 可见目录树，再按规则反解刷新勾选。 */
@@ -824,7 +858,7 @@ fun FolderScreen(
             persist()
             return
         }
-        scope.launch {
+        pendingToggle = scope.launch {
             materializeAncestors(row.path)
             removeWithDescendants(row)
             pruneEmptyPartialDirs()
@@ -849,6 +883,8 @@ fun FolderScreen(
             if (parent != null) {
                 parent.loading = false
             }
+            // 新加载的行可能正好是之前无法还原的退化路径，对齐一次让勾选状态显示正确
+            alignSelectionKeys()
             persist()
         }
     }
@@ -958,6 +994,9 @@ fun FolderScreen(
         message = null
         progress = TaskProgress("正在写入忽略规则…", 0, 0)
         scope.launch {
+            // 取消勾选会先拆分祖先（要拉一次目录树），保存前必须等它做完，
+            // 否则写出去的是拆分前的旧状态 —— 表现就是"刚取消的又同步了"。
+            pendingToggle?.join()
             val written = withContext(Dispatchers.IO) {
                 channel.writeIgnores(folder.id, buildStignoreText().split("\n"))
         }
