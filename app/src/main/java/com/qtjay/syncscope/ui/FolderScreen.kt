@@ -392,6 +392,8 @@ fun FolderScreen(
     var fileChannelProbe by remember(folder.id, fileChannel) { mutableStateOf<TestResult?>(null) }
     /** 文件通道是否正在检测中。 */
     var fileChannelProbing by remember(folder.id, fileChannel) { mutableStateOf(false) }
+    /** 托管块之外的自定义忽略规则；SyncScope 全权接管，保存时会清掉。 */
+    var foreignRules by remember(folder.id) { mutableStateOf(emptyList<String>()) }
     /** 取消勾选触发的祖先拆分还没做完；保存前必须等它，否则写出去的是旧状态。 */
     var pendingToggle by remember { mutableStateOf<Job?>(null) }
     /** 目录树最近一次从远端取回的时间。 */
@@ -692,6 +694,7 @@ fun FolderScreen(
             runCatching { channel.ignores(folder.id) }.getOrDefault(emptyList())
         }
         stignoreText = lines.joinToString("\n")
+        foreignRules = SelectiveSyncPatterns.foreignRules(stignoreText)
         refreshTree()
         applyParsed(SelectiveSyncPatterns.parseManagedBlock(stignoreText))
     }
@@ -705,6 +708,7 @@ fun FolderScreen(
             runCatching { channel.ignores(folder.id) }.getOrDefault(emptyList())
         }
         stignoreText = lines.joinToString("\n")
+        foreignRules = SelectiveSyncPatterns.foreignRules(stignoreText)
         applyParsed(SelectiveSyncPatterns.parseManagedBlock(stignoreText))
     }
 
@@ -759,7 +763,8 @@ fun FolderScreen(
     fun buildStignoreText(): String {
         val allOn = rows.isNotEmpty() && rows.all { stateOf(it) == TriState.ON }
         if (allOn) {
-            // 全部打勾 = 不需要任何忽略规则，移除本应用生成的块（用户自己的规则保留）
+            // 全部打勾 = 零规则。接管模式下连块外的自定义规则也一起清空，
+            // 否则它们会抢在托管块之前命中，界面状态与事实对不上
             return SelectiveSyncPatterns.stripManagedBlock(stignoreText)
         }
         val all = ArrayList<String>()
@@ -1015,17 +1020,23 @@ fun FolderScreen(
             withContext(Dispatchers.IO) { channel.rescan(folder.id) }
             // 本次取消勾选的：拿打开时读到的规则做差集
             val removed = topLevelPaths(baseline.all() - currentSelection().all())
-            // 这一页只负责写规则，删除一律交给「校验文件」模块 ——
-            // 那边会先确认远端有没有副本，能挡住"只有本机一份"的误删。
-            finishSave(
+            // 保存前先记下接管了多少条，refreshRulesOnly 之后 foreignRules 会被清空
+            val takenOver = foreignRules.size
+            val note = buildString {
                 if (removed.isEmpty()) {
-                    "已保存"
+                    append("已保存")
                 } else {
-                    "已保存并写入忽略规则。本次取消勾选 ${removed.size} 项，" +
-                        "等 Syncthing 完成扫描（修改忽略规则文件会触发扫描）后，" +
-                        "记得去「校验文件」删除这些不再同步的文件。"
-                },
-            )
+                    append("已保存并写入忽略规则。本次取消勾选 ${removed.size} 项，")
+                    append("等 Syncthing 完成扫描（修改忽略规则文件会触发扫描）后，")
+                    append("记得去「校验文件」删除这些不再同步的文件。")
+                }
+                if (takenOver > 0) {
+                    append(" 已接管并清除 $takenOver 条原有自定义忽略规则，")
+                    append("此后 .stignore 完全由 SyncScope 管理。")
+                }
+            }
+            // 这一页只负责写规则，删除一律交给「校验文件」模块
+            finishSave(note)
         }
     }
 
@@ -1109,6 +1120,19 @@ fun FolderScreen(
                     "此时目录树看不到对方磁盘上的真实内容，" +
                     "取消勾选也只会写入忽略规则、不会删除文件。" +
                     "请到「文件通道」页检查配置后重试。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+        }
+
+        // 原有自定义规则：它们排在托管块之前会抢先命中，界面状态与事实对不上。
+        // 接管后保存就会清掉，这里提前说明，避免用户以为 SyncScope 悄悄删了东西。
+        if (foreignRules.isNotEmpty()) {
+            Text(
+                "检测到 ${foreignRules.size} 条自定义忽略规则（不属于 SyncScope）。" +
+                    "SyncScope 全权接管 .stignore，保存后会清除这些规则；" +
+                    "在这之前目录树显示的勾选状态可能与 Syncthing 实际状态不一致。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -2017,7 +2041,7 @@ private fun FileChannelBrowser(
             Text(
                 if (path.isEmpty()) "根目录 /" else "/$path",
                 modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodyLarge,
             )
             if (path.isNotEmpty()) {
                 TextButton(onClick = { path = path.substringBeforeLast('/', "") }) {
@@ -2061,12 +2085,12 @@ private fun FileChannelBrowser(
                     Text(
                         text = if (entry.isDirectory()) "$name/" else name,
                         modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodyLarge,
                     )
                     if (entry.size > 0L && !entry.isDirectory()) {
                         Text(
                             "${entry.size / 1024} KB",
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MaterialTheme.typography.bodyMedium,
                         )
                     }
                 }

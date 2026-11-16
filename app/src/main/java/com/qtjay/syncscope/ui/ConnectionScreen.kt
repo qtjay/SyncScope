@@ -654,7 +654,7 @@ private fun DirectoryPicker(
             }
             Text(
                 heading,
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(start = 8.dp),
             )
         }
@@ -666,7 +666,7 @@ private fun DirectoryPicker(
             ) {
                 Text(
                     if (current.isEmpty()) "（根）" else "/$current",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.weight(1f),
                 )
                 TextButton(
@@ -713,7 +713,7 @@ private fun DirectoryPicker(
                     ) {
                         Text(
                             "$entryName/",
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MaterialTheme.typography.bodyLarge,
                             modifier = Modifier.weight(1f),
                         )
                     }

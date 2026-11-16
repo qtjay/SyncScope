@@ -20,7 +20,11 @@ import java.util.Set;
  *       "父目录被 ! 放行"的深层路径，必须给每个被下钻的目录显式补一条"忽略其余子项"。</li>
  * </ol>
  *
- * <p>托管块放在 .stignore 末尾，用户自有规则排在前面，因此用户规则优先级更高。
+ * <p><b>SyncScope 全权接管 .stignore</b>：托管块之外不保留任何规则。
+ * syncthing 的匹配是"首个命中的规则生效"，如果保留用户原先写在块外的自定义规则，
+ * 它们排在托管块之前就会优先命中 —— 界面上"没勾"的项可能仍被放行、
+ * "勾了"的项可能仍被忽略，勾选状态与 syncthing 的实际状态对不上。
+ * 所以这里生成的文本只包含本应用的托管块，勾选集就是唯一事实来源。
  */
 public final class SelectiveSyncPatterns {
 
@@ -123,8 +127,9 @@ public final class SelectiveSyncPatterns {
     }
 
     /**
-     * 把托管块合并进已有 .stignore 文本。
-     * 用户自有规则原样保留且排在块之前，因此优先级更高。
+     * 把托管块写进 .stignore。
+     *
+     * <p>SyncScope 全权接管：块外的自定义规则一律不保留，避免它们抢在托管块之前命中。
      */
     public static Result buildStignore(String existingText, List<String> selected, Set<String> dirs) {
         return buildStignore(existingText, selected, dirs, DEFAULT_MAX_PATTERNS);
@@ -139,7 +144,7 @@ public final class SelectiveSyncPatterns {
 
     /**
      * @param enabled false 表示关闭选择性同步（转为全部同步）：
-     *                只保留用户自有规则，移除托管块；选择集仍保留，可随时再开启。
+     *                清空 .stignore（不留任何规则）；选择集仍保留，可随时再开启。
      */
     public static Result buildStignore(String existingText,
                                        List<String> selected,
@@ -174,40 +179,18 @@ public final class SelectiveSyncPatterns {
                                    List<String> blockLines,
                                    List<String> warnings,
                                    boolean enabled) {
-        List<String> kept = new ArrayList<>();
-        boolean skipping = false;
-        if (existingText != null && !existingText.isEmpty()) {
-            for (String line : existingText.split("\n", -1)) {
-                String stripped = line.trim();
-                if (BLOCK_BEGIN.equals(stripped)) {
-                    skipping = true;
-                    continue;
-                }
-                if (BLOCK_END.equals(stripped)) {
-                    skipping = false;
-                    continue;
-                }
-                if (!skipping) {
-                    kept.add(line);
-                }
-            }
-        }
-        while (!kept.isEmpty() && kept.get(kept.size() - 1).trim().isEmpty()) {
-            kept.remove(kept.size() - 1);
+        // 接管：块外原有的自定义规则会被清掉，先数出来告诉用户，不做静默删除。
+        List<String> foreign = foreignRules(existingText);
+        if (!foreign.isEmpty()) {
+            warnings.add("已接管并清除 " + foreign.size() + " 条原有自定义忽略规则");
         }
 
-        List<String> out = new ArrayList<>(kept);
         if (!enabled) {
-            // 全部同步：不再写入托管块
-            StringBuilder plain = new StringBuilder();
-            for (String line : out) {
-                plain.append(line).append('\n');
-            }
-            return new Result(plain.toString(), warnings);
+            // 全部同步：.stignore 必须彻底为空，留任何一条规则都会让界面与事实再次打架
+            return new Result("", warnings);
         }
-        if (!out.isEmpty()) {
-            out.add("");
-        }
+
+        List<String> out = new ArrayList<>();
         out.add(BLOCK_BEGIN);
         out.addAll(blockLines);
         out.add(BLOCK_END);
@@ -217,6 +200,36 @@ public final class SelectiveSyncPatterns {
             sb.append(line).append('\n');
         }
         return new Result(sb.toString(), warnings);
+    }
+
+    /**
+     * 列出托管块之外、由用户或别的工具写下的规则（不含空行、注释、托管块标记）。
+     *
+     * <p>用于进入界面时提醒"这些规则会影响当前显示的状态"，
+     * 以及保存时告诉用户一共接管了多少条。
+     */
+    public static List<String> foreignRules(String stignoreText) {
+        List<String> out = new ArrayList<>();
+        if (stignoreText == null || stignoreText.isEmpty()) {
+            return out;
+        }
+        boolean inside = false;
+        for (String raw : stignoreText.split("\n", -1)) {
+            String line = raw.trim();
+            if (BLOCK_BEGIN.equals(line)) {
+                inside = true;
+                continue;
+            }
+            if (BLOCK_END.equals(line)) {
+                inside = false;
+                continue;
+            }
+            if (inside || line.isEmpty() || line.startsWith("//") || line.startsWith("#")) {
+                continue;
+            }
+            out.add(line);
+        }
+        return out;
     }
 
     /** 从托管块文本判断是否已被本功能接管。选择集本身持久化在 {@link SelectiveSyncStore}。 */
@@ -291,33 +304,14 @@ public final class SelectiveSyncPatterns {
         return new Selection(hasBlock, selected, full, hasBlock && selected.isEmpty());
     }
 
-    /** 去掉托管块，只保留用户自己的规则（关闭选择性同步时用）。 */
+    /**
+     * 全部同步时清空 .stignore。
+     *
+     * <p>SyncScope 全权接管后，"全部同步"就是零规则；不能再把块外的自定义规则留下来，
+     * 否则关掉选择性同步后它们又抢先命中，界面和实际状态依旧对不上。
+     */
     public static String stripManagedBlock(String stignoreText) {
-        if (stignoreText == null) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder();
-        boolean inside = false;
-        for (String raw : stignoreText.split("\n", -1)) {
-            String line = raw.trim();
-            if (line.equals(BLOCK_BEGIN)) {
-                inside = true;
-                continue;
-            }
-            if (line.equals(BLOCK_END)) {
-                inside = false;
-                continue;
-            }
-            if (inside) {
-                continue;
-            }
-            sb.append(raw).append('\n');
-        }
-        String result = sb.toString();
-        while (result.endsWith("\n\n")) {
-            result = result.substring(0, result.length() - 1);
-        }
-        return result;
+        return "";
     }
 
     /** 规则行 -> 相对路径：去掉前导 / 、尾部 /** 与转义符。 */
